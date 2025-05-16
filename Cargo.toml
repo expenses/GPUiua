@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 env_logger = "0.11.8"
-nbn = {path = "../nbn"}
+logos = "0.15.0"
+pollster = "0.4.0"
+wgpu = "25.0.0"
