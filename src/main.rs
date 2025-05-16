@@ -1,6 +1,8 @@
 struct ShaderCode {
     code: String,
     func_index: u32,
+    operations: Vec<PipelineRef>,
+    scalar_function: String,
 }
 
 impl ShaderCode {
@@ -9,7 +11,7 @@ impl ShaderCode {
             "
 @compute @workgroup_size(1,1,1)
 fn func_{}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{
-    {};
+    {}
 }}
 ",
             self.func_index, code
@@ -19,20 +21,34 @@ fn func_{}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{
         func_index
     }
 
-    fn push_scalar(&mut self, value: f32) -> u32 {
-        self.push_function(&format!("values[allocate(vec3(1,1,1))] = {}", value))
+    fn finish_scalar_function(&mut self) {
+        if !self.scalar_function.is_empty() {
+            let scalar_function = std::mem::take(&mut self.scalar_function);
+            let id = self.push_function(&scalar_function);
+            self.operations.push(PipelineRef::Scalar(id));
+        }
     }
 
-    fn write(&mut self, code: &str) -> u32 {
-        self.push_function(&format!("write_to_buffer(0, thread_id, {})", code))
+    fn push_scalar_function_line(&mut self, line: &str) {
+        self.scalar_function.push_str(&format!("{};\n", line));
     }
 
-    fn allocate(&mut self, code: &str) -> u32 {
-        self.push_function(&format!("allocate({})", code))
+    fn push_scalar(&mut self, value: f32) {
+        self.push_scalar_function_line(&format!("values[allocate(vec3(1,1,1))] = {}", value));
+    }
+
+    fn write(&mut self, code: &str, target_index: u32, num_operands: u32) {
+        self.finish_scalar_function();
+        let num = self.push_function(&format!(
+            "write_to_buffer({}, thread_id, {});",
+            target_index, code
+        ));
+        self.operations.push(PipelineRef::Num(num));
+        for _ in 0..num_operands {
+            self.push_scalar_function_line("pop()");
+        }
     }
 }
-
-use std::collections::HashMap;
 
 use logos::Logos;
 
@@ -49,6 +65,12 @@ enum Token {
     Eq,
     #[token(".")]
     Dup,
+    #[token("⊙")]
+    Dip,
+    #[token("÷")]
+    Div,
+    #[token("×")]
+    Mul,
     #[token("⇌")]
     Rev,
     #[token("⊸")]
@@ -69,27 +91,11 @@ enum Token {
 
 #[derive(Debug)]
 enum PipelineRef {
-    Num(u32),
-    Name(&'static str),
-}
-
-#[derive(Debug)]
-enum Operation {
-    Set {
-        allocate: PipelineRef,
-        write: PipelineRef,
-    },
     Scalar(u32),
+    Num(u32),
 }
 
 fn main() {
-    let code = "
-        ⇡5  # 0 through 4
-        ⊞=. # Identity matrix
-        ⊸⇌  # Reverse
-        ↥   # Max
-        ";
-
     let instance = wgpu::Instance::new(&Default::default());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
@@ -97,149 +103,104 @@ fn main() {
     let mut shader_code = ShaderCode {
         code: include_str!("../out.wgsl").into(),
         func_index: 0,
+        operations: Vec::new(),
+        scalar_function: String::new(),
     };
 
-    let lines_reversed = code
-        .lines()
-        .rev()
-        .flat_map(|string| string.chars().chain(std::iter::once('\n')))
-        .collect::<String>();
-    println!("{}", &lines_reversed);
     let input = std::env::args().nth(1).unwrap();
-    let mut lexer = Token::lexer(&input).peekable();
 
-    let mut operations = Vec::new();
+    let mut tokens: Vec<_> = Token::lexer(&input).collect();
+    tokens.reverse();
+
+    let mut lexer = tokens.into_iter().peekable();
 
     while let Some(token) = lexer.next() {
-        let mut token = token.unwrap();
-        let is_back = if token == Token::Back {
-            token = lexer.next().unwrap().unwrap();
+        let token = token.unwrap();
+
+        let mut write = 0;
+        let mut read_1_index = 1;
+        let mut read_2_index = 2;
+
+        if lexer.peek() == Some(&Ok(Token::Back)) {
+            std::mem::swap(&mut read_1_index, &mut read_2_index);
+            let _ = lexer.next();
+        }
+
+        while lexer.peek() == Some(&Ok(Token::Dip)) {
+            //write += 1;
+            read_1_index += 1;
+            read_2_index += 1;
+            let _ = lexer.next();
+        }
+
+        let mut read_1 = format!("read_buffer({}, thread_id)", read_1_index);
+        let mut read_2 = format!("read_buffer({}, thread_id)", read_2_index);
+        let mut diadic_alloc_method = "allocate_max()".into();
+
+        if lexer.peek() == Some(&Ok(Token::Table)) {
+            read_1 = format!("read_buffer({}, thread_id)", read_1_index);
+            read_2 = format!("read_buffer({}, thread_id.yxz)", read_2_index);
+            diadic_alloc_method = format!(
+                "allocate(max(load_buffer({}).xyz, load_buffer({}).yxz))",
+                read_1_index - 1,
+                read_2_index - 1
+            );
+
+            let _ = lexer.next();
             true
         } else {
             false
         };
 
-        let (mut first_read, mut second_read) = if lexer.peek() == Some(&Ok(Token::Dup)) {
-            let _ = lexer.next();
-            ("read_buffer(1, thread_id)", "read_buffer(1, thread_id)")
-        } else {
-            ("read_buffer(1, thread_id)", "read_buffer(2, thread_id)")
-        };
-
-        if is_back {
-            std::mem::swap(&mut first_read, &mut second_read);
-        }
-
         match token {
-            Token::Table => {
-                let mut token = lexer.next().unwrap().unwrap();
-                let is_back = if token == Token::Back {
-                    token = lexer.next().unwrap().unwrap();
-                    true
-                } else {
-                    false
-                };
-                let (mut first_read, mut first_id, mut second_read, mut second_id) =
-                    if lexer.peek() == Some(&Ok(Token::Dup)) {
-                        let _ = lexer.next();
-                        (
-                            "read_buffer(1, thread_id)",
-                            0,
-                            "read_buffer(1, thread_id.yxz)",
-                            0,
-                        )
-                    } else {
-                        (
-                            "read_buffer(1, thread_id)",
-                            0,
-                            "read_buffer(2, thread_id.yxz)",
-                            1,
-                        )
-                    };
-
-                if is_back {
-                    std::mem::swap(&mut first_read, &mut second_read);
-                    std::mem::swap(&mut first_id, &mut second_id);
-                }
-
-                let allocate = PipelineRef::Num(shader_code.allocate(&format!(
-                    "max(load_buffer({}).xyz, load_buffer({}).yxz)",
-                    first_id, second_id
-                )));
-                operations.push(Operation::Set {
-                    allocate,
-                    write: match token {
-                        Token::Eq => PipelineRef::Num(
-                            shader_code.write(&format!("f32({} == {})", first_read, second_read)),
-                        ),
-                        Token::Ne => PipelineRef::Num(
-                            shader_code.write(&format!("f32({} != {})", first_read, second_read)),
-                        ),
-                        Token::Add => PipelineRef::Num(
-                            shader_code.write(&format!("{} + {}", first_read, second_read)),
-                        ),
-                        Token::Sub => PipelineRef::Num(
-                            shader_code.write(&format!("{} - {}", first_read, second_read)),
-                        ),
-                        _ => panic!(),
-                    },
-                });
-            }
-            Token::Max => {
-                operations.push(Operation::Set {
-                    allocate: PipelineRef::Name("allocate_copy"),
-                    write: PipelineRef::Num(
-                        shader_code.write(&format!("max({}, {})", first_read, second_read)),
-                    ),
-                });
-            }
-            Token::Add => {
-                operations.push(Operation::Set {
-                    allocate: PipelineRef::Name("allocate_max"),
-                    write: PipelineRef::Num(
-                        shader_code.write(&format!("{} + {}", first_read, second_read)),
-                    ),
-                });
-            }
-            Token::Sub => {
-                operations.push(Operation::Set {
-                    allocate: PipelineRef::Name("allocate_max"),
-                    write: PipelineRef::Num(
-                        shader_code.write(&format!("{} - {}", first_read, second_read)),
-                    ),
-                });
-            }
-            Token::Rev => {
-                operations.push(Operation::Set {
-                    allocate: PipelineRef::Name("allocate_copy"),
-                    write: PipelineRef::Name("rev"),
-                });
-            }
             Token::Value(value) => {
-                operations.push(Operation::Scalar(shader_code.push_scalar(value)))
+                shader_code.push_scalar(value);
+            }
+            Token::Dup => {
+                shader_code.push_scalar_function_line("dup()");
             }
             Token::Range => {
-                operations.push(Operation::Set {
-                    allocate: PipelineRef::Name("allocate_range"),
-                    write: PipelineRef::Name("write_range"),
-                });
+                shader_code.push_scalar_function_line("allocate_range()");
+                shader_code.write("f32(thread_id.x)", write, 1);
+            }
+            Token::Div => {
+                shader_code.push_scalar_function_line(&diadic_alloc_method);
+                shader_code.write(&format!("{} / {}", read_1, read_2), write, 2);
+            }
+            Token::Add => {
+                shader_code.push_scalar_function_line(&diadic_alloc_method);
+                shader_code.write(&format!("{} + {}", read_1, read_2), write, 2);
+            }
+            Token::Mul => {
+                shader_code.push_scalar_function_line(&diadic_alloc_method);
+                shader_code.write(&format!("{} * {}", read_1, read_2), write, 2);
             }
             Token::Eq => {
-                operations.push(Operation::Set {
-                    allocate: PipelineRef::Name("allocate_copy"),
-                    write: PipelineRef::Num(
-                        shader_code.write(&format!("f32({} == {})", first_read, second_read)),
+                shader_code.push_scalar_function_line(&diadic_alloc_method);
+                shader_code.write(&format!("f32({} == {})", read_1, read_2), write, 2);
+            }
+            Token::Max => {
+                shader_code.push_scalar_function_line(&diadic_alloc_method);
+                shader_code.write(&format!("max({}, {})", read_1, read_2), write, 2);
+            }
+            Token::Rev => {
+                shader_code.push_scalar_function_line("allocate_copy()");
+                shader_code.write(
+                    &format!(
+                        "read_buffer({0}, vec3(load_buffer({0}).x - 1 - thread_id.x, thread_id.yz))",
+                        read_1_index
                     ),
-                });
+                    write,
+                    1,
+                );
             }
-            Token::On | Token::Comment => {}
-            _ => {
-                panic!("{:?}", token);
-            }
-        };
+            _ => panic!(),
+        }
     }
 
-    //println!("{}", &shader_code.code);
+    shader_code.finish_scalar_function();
+
+    println!("{}", &shader_code.code);
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -267,29 +228,6 @@ fn main() {
         bind_group_layouts: &[&bind_group_layout],
         push_constant_ranges: &[],
     });
-
-    let create_pipeline = |entry_point| -> wgpu::ComputePipeline {
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some(entry_point),
-            compilation_options: Default::default(),
-            cache: None,
-        })
-    };
-
-    let mut named_pipelines = HashMap::new();
-
-    let mut add = |name| {
-        named_pipelines.insert(name, create_pipeline(name));
-    };
-
-    add("allocate_range");
-    add("write_range");
-    add("allocate_copy");
-    add("allocate_max");
-    add("rev");
 
     let pipelines: Vec<_> = (0..shader_code.func_index)
         .map(|i| {
@@ -378,22 +316,14 @@ fn main() {
 
     pass.set_bind_group(0, &bind_group, &[]);
 
-    for op in operations.iter().rev() {
+    for op in shader_code.operations.iter() {
         match op {
-            Operation::Scalar(num) => {
+            PipelineRef::Scalar(num) => {
                 pass.set_pipeline(&pipelines[*num as usize]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
-            Operation::Set { allocate, write } => {
-                pass.set_pipeline(match allocate {
-                    PipelineRef::Num(num) => &pipelines[*num as usize],
-                    PipelineRef::Name(name) => &named_pipelines[name],
-                });
-                pass.dispatch_workgroups(1, 1, 1);
-                pass.set_pipeline(match write {
-                    PipelineRef::Num(num) => &pipelines[*num as usize],
-                    PipelineRef::Name(name) => &named_pipelines[name],
-                });
+            PipelineRef::Num(num) => {
+                pass.set_pipeline(&pipelines[*num as usize]);
                 pass.dispatch_workgroups_indirect(&dispatches, 0);
             }
         }
