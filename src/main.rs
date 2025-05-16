@@ -43,6 +43,8 @@ enum Token {
     Range,
     #[token("⊞")]
     Table,
+    #[token("+")]
+    Add,
     #[token("=")]
     Eq,
     #[token(".")]
@@ -53,6 +55,12 @@ enum Token {
     On,
     #[token("↥")]
     Max,
+    #[token("~")]
+    Back,
+    #[token("-")]
+    Sub,
+    #[token("≠")]
+    Ne,
     #[regex("#[^\n]*")]
     Comment,
     #[regex("[0-9]+", |lex| lex.slice().parse::<f32>().unwrap())]
@@ -86,10 +94,8 @@ fn main() {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
 
-    let shader_str = std::fs::read_to_string("out.wgsl").unwrap();
-
     let mut shader_code = ShaderCode {
-        code: shader_str,
+        code: include_str!("../out.wgsl").into(),
         func_index: 0,
     };
 
@@ -99,39 +105,82 @@ fn main() {
         .flat_map(|string| string.chars().chain(std::iter::once('\n')))
         .collect::<String>();
     println!("{}", &lines_reversed);
-    let mut lexer = Token::lexer(&lines_reversed).peekable();
+    let input = std::env::args().nth(1).unwrap();
+    let mut lexer = Token::lexer(&input).peekable();
 
     let mut operations = Vec::new();
 
     while let Some(token) = lexer.next() {
-        let (first_id, second_id) = if lexer.peek() == Some(&Ok(Token::Dup)) {
-            let _ = lexer.next();
-            (0, 0)
+        let mut token = token.unwrap();
+        let is_back = if token == Token::Back {
+            token = lexer.next().unwrap().unwrap();
+            true
         } else {
-            (0, 1)
+            false
         };
 
-        match token.unwrap() {
+        let (mut first_read, mut second_read) = if lexer.peek() == Some(&Ok(Token::Dup)) {
+            let _ = lexer.next();
+            ("read_buffer(1, thread_id)", "read_buffer(1, thread_id)")
+        } else {
+            ("read_buffer(1, thread_id)", "read_buffer(2, thread_id)")
+        };
+
+        if is_back {
+            std::mem::swap(&mut first_read, &mut second_read);
+        }
+
+        match token {
             Token::Table => {
-                let next = lexer.next().unwrap().unwrap();
-                let (first_id, second_id) = if lexer.peek() == Some(&Ok(Token::Dup)) {
-                    let _ = lexer.next();
-                    (0, 0)
+                let mut token = lexer.next().unwrap().unwrap();
+                let is_back = if token == Token::Back {
+                    token = lexer.next().unwrap().unwrap();
+                    true
                 } else {
-                    (0, 1)
+                    false
                 };
+                let (mut first_read, mut first_id, mut second_read, mut second_id) =
+                    if lexer.peek() == Some(&Ok(Token::Dup)) {
+                        let _ = lexer.next();
+                        (
+                            "read_buffer(1, thread_id)",
+                            0,
+                            "read_buffer(1, thread_id.yxz)",
+                            0,
+                        )
+                    } else {
+                        (
+                            "read_buffer(1, thread_id)",
+                            0,
+                            "read_buffer(2, thread_id.yxz)",
+                            1,
+                        )
+                    };
+
+                if is_back {
+                    std::mem::swap(&mut first_read, &mut second_read);
+                    std::mem::swap(&mut first_id, &mut second_id);
+                }
+
                 let allocate = PipelineRef::Num(shader_code.allocate(&format!(
                     "max(load_buffer({}).xyz, load_buffer({}).yxz)",
                     first_id, second_id
                 )));
                 operations.push(Operation::Set {
                     allocate,
-                    write: match next {
-                        Token::Eq => PipelineRef::Num(shader_code.write(&format!(
-                            "f32(read_buffer({}, thread_id) == read_buffer({}, thread_id.yxz))",
-                            first_id + 1,
-                            second_id + 1
-                        ))),
+                    write: match token {
+                        Token::Eq => PipelineRef::Num(
+                            shader_code.write(&format!("f32({} == {})", first_read, second_read)),
+                        ),
+                        Token::Ne => PipelineRef::Num(
+                            shader_code.write(&format!("f32({} != {})", first_read, second_read)),
+                        ),
+                        Token::Add => PipelineRef::Num(
+                            shader_code.write(&format!("{} + {}", first_read, second_read)),
+                        ),
+                        Token::Sub => PipelineRef::Num(
+                            shader_code.write(&format!("{} - {}", first_read, second_read)),
+                        ),
                         _ => panic!(),
                     },
                 });
@@ -139,11 +188,25 @@ fn main() {
             Token::Max => {
                 operations.push(Operation::Set {
                     allocate: PipelineRef::Name("allocate_copy"),
-                    write: PipelineRef::Num(shader_code.write(&format!(
-                        "max(read_buffer({}, thread_id), read_buffer({}, thread_id))",
-                        first_id + 1,
-                        second_id + 1
-                    ))),
+                    write: PipelineRef::Num(
+                        shader_code.write(&format!("max({}, {})", first_read, second_read)),
+                    ),
+                });
+            }
+            Token::Add => {
+                operations.push(Operation::Set {
+                    allocate: PipelineRef::Name("allocate_max"),
+                    write: PipelineRef::Num(
+                        shader_code.write(&format!("{} + {}", first_read, second_read)),
+                    ),
+                });
+            }
+            Token::Sub => {
+                operations.push(Operation::Set {
+                    allocate: PipelineRef::Name("allocate_max"),
+                    write: PipelineRef::Num(
+                        shader_code.write(&format!("{} - {}", first_read, second_read)),
+                    ),
                 });
             }
             Token::Rev => {
@@ -161,9 +224,17 @@ fn main() {
                     write: PipelineRef::Name("write_range"),
                 });
             }
+            Token::Eq => {
+                operations.push(Operation::Set {
+                    allocate: PipelineRef::Name("allocate_copy"),
+                    write: PipelineRef::Num(
+                        shader_code.write(&format!("f32({} == {})", first_read, second_read)),
+                    ),
+                });
+            }
             Token::On | Token::Comment => {}
             _ => {
-                dbg!(&token);
+                panic!("{:?}", token);
             }
         };
     }
@@ -217,6 +288,7 @@ fn main() {
     add("allocate_range");
     add("write_range");
     add("allocate_copy");
+    add("allocate_max");
     add("rev");
 
     let pipelines: Vec<_> = (0..shader_code.func_index)
@@ -263,13 +335,13 @@ fn main() {
     });
     let values = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 4 * 1000,
+        size: 1024 * 1024,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let values_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 4 * 1000,
+        size: 1024 * 1024,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -332,23 +404,31 @@ fn main() {
     command_encoder.copy_buffer_to_buffer(&buffers, 0, &buffers_readback, 0, buffers.size());
     let buffer = command_encoder.finish();
     let submit = queue.submit([buffer]);
-    values_readback.map_async(wgpu::MapMode::Read, .., |res| {
-        //dbg!(res);
+    let (mut values_tx, values_rx) = async_oneshot::oneshot::<()>();
+    values_readback.map_async(wgpu::MapMode::Read, .., move |res| {
+        res.unwrap();
+        values_tx.send(()).unwrap();
     });
-    buffers_readback.map_async(wgpu::MapMode::Read, .., |res| ());
+    let (mut buffers_tx, buffers_rx) = async_oneshot::oneshot::<()>();
+    buffers_readback.map_async(wgpu::MapMode::Read, .., move |res| {
+        res.unwrap();
+        buffers_tx.send(()).unwrap();
+    });
     device
         .poll(wgpu::PollType::WaitForSubmissionIndex(submit))
         .unwrap();
+    pollster::block_on(values_rx).unwrap();
+    pollster::block_on(buffers_rx).unwrap();
     let buffers_range = buffers_readback.get_mapped_range(..);
     let buffers = cast_slice::<[u32; 4]>(&buffers_range);
     let values = values_readback.get_mapped_range(..);
     let values = cast_slice::<f32>(&values);
-    for (i, &[x, y, z, offset]) in buffers
+    for (i, &arr @ [x, y, z, offset]) in buffers
         .iter()
         .take_while(|&buffer| *buffer != [0_u32; 4])
         .enumerate()
     {
-        println!("{}:", i);
+        println!("{} {:?}:", i, arr);
         if (y, z) == (1, 1) {
             println!(
                 "{:?}",

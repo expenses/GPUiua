@@ -37,6 +37,10 @@ fn allocate(size: vec3<u32>) -> u32 {
     return offset;
 }
 
+fn free() {
+    stack_len -= 1;
+}
+
 @compute @workgroup_size(1,1,1)
 fn allocate_range() {
     allocate(vec3<u32>(u32(values[load_buffer(0).w]), 1, 1));
@@ -50,6 +54,11 @@ fn write_range(@builtin(global_invocation_id) thread_id : vec3<u32>) {
 @compute @workgroup_size(1,1,1)
 fn allocate_copy() {
     allocate(load_buffer(0).xyz);
+}
+
+@compute @workgroup_size(1,1,1)
+fn allocate_max() {
+    allocate(max(load_buffer(0).xyz, load_buffer(1).xyz));
 }
 
 @compute @workgroup_size(1,1,1)
