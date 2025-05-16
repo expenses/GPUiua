@@ -6,15 +6,15 @@ struct ShaderCode {
 }
 
 impl ShaderCode {
-    fn push_function(&mut self, code: &str) -> u32 {
+    fn push_function(&mut self, code: &str, workgroup_size: u32) -> u32 {
         self.code.push_str(&format!(
             "
-@compute @workgroup_size(1,1,1)
-fn func_{}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{
-    {}
+@compute @workgroup_size({0},{0},{0})
+fn func_{1}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{
+    {2}
 }}
 ",
-            self.func_index, code
+            workgroup_size, self.func_index, code
         ));
         let func_index = self.func_index;
         self.func_index += 1;
@@ -24,7 +24,7 @@ fn func_{}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{
     fn finish_scalar_function(&mut self) {
         if !self.scalar_function.is_empty() {
             let scalar_function = std::mem::take(&mut self.scalar_function);
-            let id = self.push_function(&scalar_function);
+            let id = self.push_function(&scalar_function, 1);
             self.operations.push(PipelineRef::Scalar(id));
         }
     }
@@ -37,12 +37,22 @@ fn func_{}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{
         self.push_scalar_function_line(&format!("values[allocate(vec3(1,1,1))] = {}", value));
     }
 
-    fn write(&mut self, code: &str, target_index: u32, num_operands: u32) {
+    fn write(&mut self, code: &str, num_operands: u32) {
         self.finish_scalar_function();
-        let num = self.push_function(&format!(
-            "write_to_buffer({}, thread_id, {});",
-            target_index, code
-        ));
+        let num = self.push_function(&format!("write_to_buffer(0, thread_id, {});", code), 4);
+        self.operations.push(PipelineRef::Num(num));
+        for _ in 0..num_operands {
+            self.push_scalar_function_line("pop()");
+        }
+    }
+
+    // overflow needs to be handled e.g. with a range 3, where the dispatch size of 4x4x4 will cause 3 to be written to the last value not 2.
+    fn write_no_overflow(&mut self, code: &str, num_operands: u32) {
+        self.finish_scalar_function();
+        let num = self.push_function(
+            &format!("write_to_buffer_no_overflow(0, thread_id, {});", code),
+            4,
+        );
         self.operations.push(PipelineRef::Num(num));
         for _ in 0..num_operands {
             self.push_scalar_function_line("pop()");
@@ -77,6 +87,8 @@ enum Token {
     On,
     #[token("↥")]
     Max,
+    #[token("↧")]
+    Min,
     #[token("~")]
     Back,
     #[token("-")]
@@ -117,7 +129,6 @@ fn main() {
     while let Some(token) = lexer.next() {
         let token = token.unwrap();
 
-        let mut write = 0;
         let mut read_1_index = 1;
         let mut read_2_index = 2;
 
@@ -126,10 +137,11 @@ fn main() {
             let _ = lexer.next();
         }
 
+        let mut dips = 0;
+
         while lexer.peek() == Some(&Ok(Token::Dip)) {
-            //write += 1;
-            read_1_index += 1;
-            read_2_index += 1;
+            dips += 1;
+            shader_code.push_scalar_function_line("dip()");
             let _ = lexer.next();
         }
 
@@ -161,27 +173,31 @@ fn main() {
             }
             Token::Range => {
                 shader_code.push_scalar_function_line("allocate_range()");
-                shader_code.write("f32(thread_id.x)", write, 1);
+                shader_code.write_no_overflow("f32(thread_id.x)", 1);
             }
             Token::Div => {
                 shader_code.push_scalar_function_line(&diadic_alloc_method);
-                shader_code.write(&format!("{} / {}", read_1, read_2), write, 2);
+                shader_code.write(&format!("{} / {}", read_2, read_1), 2);
             }
             Token::Add => {
                 shader_code.push_scalar_function_line(&diadic_alloc_method);
-                shader_code.write(&format!("{} + {}", read_1, read_2), write, 2);
+                shader_code.write(&format!("{} + {}", read_1, read_2), 2);
             }
             Token::Mul => {
                 shader_code.push_scalar_function_line(&diadic_alloc_method);
-                shader_code.write(&format!("{} * {}", read_1, read_2), write, 2);
+                shader_code.write(&format!("{} * {}", read_1, read_2), 2);
             }
             Token::Eq => {
                 shader_code.push_scalar_function_line(&diadic_alloc_method);
-                shader_code.write(&format!("f32({} == {})", read_1, read_2), write, 2);
+                shader_code.write(&format!("f32({} == {})", read_1, read_2), 2);
             }
             Token::Max => {
                 shader_code.push_scalar_function_line(&diadic_alloc_method);
-                shader_code.write(&format!("max({}, {})", read_1, read_2), write, 2);
+                shader_code.write(&format!("max({}, {})", read_1, read_2), 2);
+            }
+            Token::Min => {
+                shader_code.push_scalar_function_line(&diadic_alloc_method);
+                shader_code.write(&format!("min({}, {})", read_1, read_2), 2);
             }
             Token::Rev => {
                 shader_code.push_scalar_function_line("allocate_copy()");
@@ -190,11 +206,14 @@ fn main() {
                         "read_buffer({0}, vec3(load_buffer({0}).x - 1 - thread_id.x, thread_id.yz))",
                         read_1_index
                     ),
-                    write,
                     1,
                 );
             }
             _ => panic!(),
+        }
+
+        for _ in 0..dips {
+            shader_code.push_scalar_function_line("undip()");
         }
     }
 
@@ -220,7 +239,7 @@ fn main() {
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[entry(0), entry(1), entry(2), entry(3), entry(4)],
+        entries: &[entry(0), entry(1), entry(2), entry(3)],
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -242,29 +261,20 @@ fn main() {
         })
         .collect();
 
-    let create_buffer = |size| {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        })
-    };
-
-    let buffers = device.create_buffer(&wgpu::BufferDescriptor {
+    // min_storage_buffer_offset_alignment of 256.
+    let data_and_buffers_len = 256 + 4 * 4 * 200;
+    let data_and_buffers = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 4 * 4 * 100,
+        size: data_and_buffers_len,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let buffers_readback = device.create_buffer(&wgpu::BufferDescriptor {
+    let data_and_buffers_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 4 * 4 * 100,
+        size: data_and_buffers_len,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let stack_len = create_buffer(4);
-    let current_offset = create_buffer(4);
     let dispatches = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: 4 * 3 * 2,
@@ -290,22 +300,26 @@ fn main() {
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: buffers.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &data_and_buffers,
+                    offset: 256,
+                    size: None,
+                }),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: stack_len.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &data_and_buffers,
+                    offset: 0,
+                    size: None,
+                }),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: current_offset.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
                 resource: values.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 4,
+                binding: 3,
                 resource: dispatches.as_entire_binding(),
             },
         ],
@@ -331,7 +345,13 @@ fn main() {
 
     drop(pass);
     command_encoder.copy_buffer_to_buffer(&values, 0, &values_readback, 0, values.size());
-    command_encoder.copy_buffer_to_buffer(&buffers, 0, &buffers_readback, 0, buffers.size());
+    command_encoder.copy_buffer_to_buffer(
+        &data_and_buffers,
+        0,
+        &data_and_buffers_readback,
+        0,
+        data_and_buffers.size(),
+    );
     let buffer = command_encoder.finish();
     let submit = queue.submit([buffer]);
     let (mut values_tx, values_rx) = async_oneshot::oneshot::<()>();
@@ -340,7 +360,7 @@ fn main() {
         values_tx.send(()).unwrap();
     });
     let (mut buffers_tx, buffers_rx) = async_oneshot::oneshot::<()>();
-    buffers_readback.map_async(wgpu::MapMode::Read, .., move |res| {
+    data_and_buffers_readback.map_async(wgpu::MapMode::Read, .., move |res| {
         res.unwrap();
         buffers_tx.send(()).unwrap();
     });
@@ -349,15 +369,12 @@ fn main() {
         .unwrap();
     pollster::block_on(values_rx).unwrap();
     pollster::block_on(buffers_rx).unwrap();
-    let buffers_range = buffers_readback.get_mapped_range(..);
-    let buffers = cast_slice::<[u32; 4]>(&buffers_range);
+    let buffers_range = data_and_buffers_readback.get_mapped_range(..);
+    let stack_len = cast_slice::<u32>(&buffers_range)[0];
+    let buffers = cast_slice::<[u32; 4]>(&buffers_range[256..]);
     let values = values_readback.get_mapped_range(..);
     let values = cast_slice::<f32>(&values);
-    for (i, &arr @ [x, y, z, offset]) in buffers
-        .iter()
-        .take_while(|&buffer| *buffer != [0_u32; 4])
-        .enumerate()
-    {
+    for (i, &arr @ [x, y, z, offset]) in buffers.iter().take(stack_len as _).enumerate() {
         println!("{} {:?}:", i, arr);
         if (y, z) == (1, 1) {
             println!(
