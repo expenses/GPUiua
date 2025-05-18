@@ -168,13 +168,13 @@ impl Context {
         values_rx.await.unwrap();
         buffers_rx.await.unwrap();
         let buffers_range = data_and_buffers_readback.get_mapped_range(..);
-        let buffers = cast_slice::<[u32; 4]>(&buffers_range[256..]);
+        let buffers = cast_slice::<[u32; 8]>(&buffers_range[256..]);
         let values = values_readback.get_mapped_range(..);
         let values = cast_slice::<f32>(&values);
         //dbg!(&values[..20]);
-        for (i, &arr @ [x, y, z, offset]) in buffers
+        for (i, &arr @ [x, y, z, w, offset, ..]) in buffers
             .iter()
-            .take_while(|&&buffer| buffer != [0; 4])
+            .take_while(|&&buffer| buffer != [0; 8])
             .enumerate()
         {
             println!("{} {:?}:", i, arr);
@@ -354,8 +354,8 @@ enum StackItem {
 impl StackItem {
     fn size(&self) -> String {
         match &self {
-            Self::Buffer(id) => format!("buffers[{}].xyz", id),
-            Self::Other { .. } => "vec3(1, 1, 1)".to_string(),
+            Self::Buffer(id) => format!("buffers[{}].size", id),
+            Self::Other { .. } => "vec4(1)".to_string(),
         }
     }
 
@@ -425,6 +425,10 @@ impl Parser {
                     self.num_allocated, self.output_size
                 ));
                 write_commands.push(format!(
+                    "thread_id = index_to_coord(thread.x, buffers[{}].size)",
+                    self.num_allocated
+                ));
+                write_commands.push(format!(
                     "write_to_buffer({}, thread_id, {})",
                     self.num_allocated,
                     item.str("thread_id")
@@ -460,7 +464,7 @@ impl Parser {
         let is_output = v.is_output() || modifier_expecting_op.is_some();
         let access = match modifier_expecting_op {
             Some(ModifierAccess::Normal) | None => "thread_id",
-            Some(ModifierAccess::Transpose) => "thread_id.yxz",
+            Some(ModifierAccess::Transpose) => "thread_id.yxzw",
         };
         self.stack.push(StackItem::Other {
             str: func(v.str(access)),
@@ -478,7 +482,7 @@ impl Parser {
         let is_output = a.is_output() || b.is_output() || modifier_expecting_op.is_some();
         let first_access = match modifier_expecting_op {
             Some(ModifierAccess::Normal) | None => "thread_id",
-            Some(ModifierAccess::Transpose) => "thread_id.yxz",
+            Some(ModifierAccess::Transpose) => "thread_id.yxzw",
         };
         self.stack.push(StackItem::Other {
             str: func(b.str(first_access), a.str("thread_id")),
@@ -533,7 +537,7 @@ fn main() {
                 Code::Range => {
                     parser.finish_write();
                     let len = parser.pop();
-                    parser.output_size = format!("vec3({}, 1, 1)", len.str("unreachable!"));
+                    parser.output_size = format!("vec4({}, 1, 1, 1)", len.str("unreachable!"));
                     parser.stack.push(StackItem::Other {
                         str: "f32(thread_id.x)".to_owned(),
                         is_output: true,
@@ -543,7 +547,7 @@ fn main() {
                     parser.finish_write();
                     let a = parser.peek(0);
                     let b = parser.peek(1);
-                    parser.output_size = format!("max({}, {}.yxz)", a.size(), b.size());
+                    parser.output_size = format!("max({}, {}.yxzw)", a.size(), b.size());
                     parser.modifier_expecting_op = Some(ModifierAccess::Transpose);
                     parser.handle_operation(op);
                 }
@@ -552,7 +556,7 @@ fn main() {
                     let v = parser.peek(0);
                     let size = v.size();
                     let str = v.str(&format!(
-                        "vec3({}.x - 1 - thread_id.x, thread_id.yz)",
+                        "vec4({}.x - 1 - thread_id.x, thread_id.yzw)",
                         v.size()
                     ));
                     parser.stack.push(StackItem::Other {
@@ -571,7 +575,14 @@ fn main() {
     parser.finish_write();
 
     for (i, function) in parser.functions.iter().enumerate() {
-        code.push_str(&format!("@compute @workgroup_size(1,1,1) fn step_{}(@builtin(global_invocation_id) thread_id : vec3<u32>) {{\n", i));
+        if i % 2 == 1 {
+            code.push_str(&format!("@compute @workgroup_size(64,1,1) fn step_{}(@builtin(global_invocation_id) thread : vec3<u32>) {{\nvar thread_id: vec4<u32>;\n", i));
+        } else {
+            code.push_str(&format!(
+                "@compute @workgroup_size(1,1,1) fn step_{}() {{\n",
+                i
+            ));
+        }
         for line in function {
             code.push_str(line);
             code.push_str(";\n");
