@@ -132,8 +132,8 @@ impl Context {
 
         pass.set_bind_group(0, &bind_group, &[]);
 
-        for step in 0..num_steps {
-            pass.set_pipeline(&pipelines[step]);
+        for (step, pipeline) in pipelines.iter().enumerate() {
+            pass.set_pipeline(pipeline);
             if step % 2 == 1 {
                 pass.dispatch_workgroups_indirect(&dispatches, 0);
             } else {
@@ -186,10 +186,7 @@ impl Context {
             } else if z == 1 {
                 let mut offset = offset as usize;
                 for _ in 0..y {
-                    println!(
-                        "{:?}",
-                        &values[offset as usize..offset as usize + x as usize]
-                    );
+                    println!("{:?}", &values[offset..offset + x as usize]);
                     offset += x as usize;
                 }
             }
@@ -201,6 +198,33 @@ use std::collections::HashMap;
 
 use logos::Logos;
 
+#[derive(Debug)]
+enum OpType {
+    Add,
+    Mul,
+    Div,
+    Eq,
+    Sin,
+    Abs,
+    Max,
+}
+
+#[derive(Debug)]
+struct Operation {
+    ty: OpType,
+    back: bool,
+}
+
+#[derive(Debug)]
+enum Code {
+    Operation(Operation),
+    Value(f32),
+    Table(Operation),
+    Rev,
+    Dup,
+    Range,
+}
+
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"\s+")]
 enum Token {
@@ -208,30 +232,117 @@ enum Token {
     Add,
     #[regex(r"mul|\*")]
     Mul,
-    #[regex(r"div")]
+    #[regex(r"div|÷")]
     Div,
-    #[regex(r"=")]
+    #[regex(r"eq|=")]
     Eq,
-    #[token("range")]
+    #[regex(r"range|⇡")]
     Range,
-    #[token("table")]
+    #[regex(r"table|⊞")]
     Table,
-    #[token("sin")]
+    #[regex(r"sin|∿")]
     Sin,
-    #[token("abs")]
+    #[regex(r"abs|⌵")]
     Abs,
-    #[token("rev")]
+    #[regex(r"rev|⇌")]
     Rev,
-    #[token("max")]
+    #[regex(r"max|↥")]
     Max,
-    #[token("back")]
+    #[regex(r"back|˜")]
     Back,
-    #[token(r"dup")]
+    #[regex(r"dup|\.")]
     Dup,
     #[regex("#[^\n]*")]
     Comment,
-    #[regex("[0-9]+", |lex| lex.slice().parse::<f32>().unwrap())]
+    #[token("\n", priority = 3)]
+    LineBreak,
+    #[regex(r"[0-9]+\.?[0-9]*", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
+}
+
+fn parse_as_op(token: Token) -> Option<OpType> {
+    match token {
+        Token::Eq => Some(OpType::Eq),
+        Token::Abs => Some(OpType::Abs),
+        Token::Add => Some(OpType::Add),
+        Token::Mul => Some(OpType::Mul),
+        Token::Div => Some(OpType::Div),
+        Token::Sin => Some(OpType::Sin),
+        Token::Max => Some(OpType::Max),
+        Token::LineBreak
+        | Token::Dup
+        | Token::Value(_)
+        | Token::Back
+        | Token::Range
+        | Token::Table
+        | Token::Rev
+        | Token::Comment => None,
+    }
+}
+
+type Line = Vec<Code>;
+
+fn parse_code(input: &str) -> Vec<Line> {
+    let mut code = Vec::new();
+    let mut line = Vec::new();
+
+    let mut lexer = Token::lexer(input);
+
+    while let Some(token) = lexer.next() {
+        let mut token = match token {
+            Ok(token) => token,
+            Err(error) => panic!("{:?}: {:?}", error, code),
+        };
+
+        let mut back = false;
+
+        while token == Token::Back {
+            back = !back;
+            token = lexer.next().unwrap().unwrap();
+        }
+
+        match token {
+            Token::Comment => {}
+            Token::Back => unreachable!(),
+            Token::Value(value) => line.push(Code::Value(value)),
+            Token::Range => line.push(Code::Range),
+            Token::Dup => line.push(Code::Dup),
+            Token::Rev => line.push(Code::Rev),
+            Token::Table => line.push(Code::Table({
+                let mut token = lexer.next().unwrap().unwrap();
+                let mut back = false;
+
+                while token == Token::Back {
+                    back = !back;
+                    token = lexer.next().unwrap().unwrap();
+                }
+
+                Operation {
+                    ty: match parse_as_op(token) {
+                        Some(op) => op,
+                        None => panic!("{:?}", token),
+                    },
+                    back,
+                }
+            })),
+            Token::LineBreak => {
+                code.push(std::mem::take(&mut line));
+            }
+            other => line.push(Code::Operation(Operation {
+                ty: match parse_as_op(other) {
+                    Some(op) => op,
+                    None => panic!("{:?}", other),
+                },
+                back,
+            })),
+        }
+    }
+
+    if !line.is_empty() {
+        code.push(line);
+    }
+
+    code
 }
 
 #[derive(Clone, Debug)]
@@ -244,7 +355,7 @@ impl StackItem {
     fn size(&self) -> String {
         match &self {
             Self::Buffer(id) => format!("buffers[{}].xyz", id),
-            Self::Other { .. } => format!("vec3(1, 1, 1)"),
+            Self::Other { .. } => "vec3(1, 1, 1)".to_string(),
         }
     }
 
@@ -374,87 +485,84 @@ impl Parser {
             is_output,
         })
     }
+
+    fn handle_operation(&mut self, operation: &Operation) {
+        match operation.ty {
+            OpType::Add => {
+                self.handle_diadic(operation.back, |a, b| format!("({} + {})", a, b));
+            }
+            OpType::Eq => {
+                self.handle_diadic(operation.back, |a, b| format!("f32({} == {})", a, b));
+            }
+            OpType::Div => {
+                self.handle_diadic(operation.back, |a, b| format!("({} / {})", a, b));
+            }
+            OpType::Mul => {
+                self.handle_diadic(operation.back, |a, b| format!("({} * {})", a, b));
+            }
+            OpType::Max => {
+                self.handle_diadic(operation.back, |a, b| format!("max({}, {})", a, b));
+            }
+            OpType::Sin => {
+                self.handle_monadic(|v| format!("sin({})", v));
+            }
+            OpType::Abs => {
+                self.handle_monadic(|v| format!("abs({})", v));
+            }
+        }
+    }
 }
 
 fn main() {
     let input = std::env::args().nth(1).unwrap();
 
+    let code = parse_code(&input);
     let mut parser = Parser::default();
 
-    let mut lexer = Token::lexer(&input);
-
-    while let Some(token) = lexer.next() {
-        let mut token = token.unwrap();
-
-        let mut back = false;
-
-        while token == Token::Back {
-            back = !back;
-            token = lexer.next().unwrap().unwrap();
-        }
-
-        match token {
-            Token::Value(val) => parser.stack.push(StackItem::Other {
-                str: val.to_string(),
-                is_output: false,
-            }),
-            Token::Dup => {
-                let top = parser.stack.last().unwrap().clone();
-                parser.stack.push(top);
+    for line in code.iter() {
+        for code in line.iter().rev() {
+            match code {
+                Code::Value(val) => parser.stack.push(StackItem::Other {
+                    str: val.to_string(),
+                    is_output: false,
+                }),
+                Code::Dup => {
+                    let top = parser.stack.last().unwrap().clone();
+                    parser.stack.push(top);
+                }
+                Code::Range => {
+                    parser.finish_write();
+                    let len = parser.pop();
+                    parser.output_size = format!("vec3({}, 1, 1)", len.str("unreachable!"));
+                    parser.stack.push(StackItem::Other {
+                        str: "f32(thread_id.x)".to_owned(),
+                        is_output: true,
+                    });
+                }
+                Code::Table(op) => {
+                    parser.finish_write();
+                    let a = parser.peek(0);
+                    let b = parser.peek(1);
+                    parser.output_size = format!("max({}, {}.yxz)", a.size(), b.size());
+                    parser.modifier_expecting_op = Some(ModifierAccess::Transpose);
+                    parser.handle_operation(op);
+                }
+                Code::Rev => {
+                    parser.finish_write();
+                    let v = parser.peek(0);
+                    let size = v.size();
+                    let str = v.str(&format!(
+                        "vec3({}.x - 1 - thread_id.x, thread_id.yz)",
+                        v.size()
+                    ));
+                    parser.stack.push(StackItem::Other {
+                        str,
+                        is_output: true,
+                    });
+                    parser.output_size = size;
+                }
+                Code::Operation(operation) => parser.handle_operation(operation),
             }
-            Token::Range => {
-                parser.finish_write();
-                let len = parser.pop();
-                parser.output_size = format!("vec3({}, 1, 1)", len.str("unreachable!"));
-                parser.stack.push(StackItem::Other {
-                    str: "f32(thread_id.x)".to_owned(),
-                    is_output: true,
-                });
-            }
-            Token::Table => {
-                parser.finish_write();
-                let a = parser.peek(0);
-                let b = parser.peek(1);
-                parser.output_size = format!("max({}, {}.yxz)", a.size(), b.size());
-                parser.modifier_expecting_op = Some(ModifierAccess::Transpose);
-            }
-            Token::Rev => {
-                parser.finish_write();
-                let v = parser.peek(0);
-                let size = v.size();
-                let str = v.str(&format!(
-                    "vec3({}.x - 1 - thread_id.x, thread_id.yz)",
-                    v.size()
-                ));
-                parser.stack.push(StackItem::Other {
-                    str: str,
-                    is_output: true,
-                });
-                parser.output_size = size;
-            }
-            Token::Add => {
-                parser.handle_diadic(back, |a, b| format!("({} + {})", a, b));
-            }
-            Token::Eq => {
-                parser.handle_diadic(back, |a, b| format!("f32({} == {})", a, b));
-            }
-            Token::Div => {
-                parser.handle_diadic(back, |a, b| format!("({} / {})", a, b));
-            }
-            Token::Mul => {
-                parser.handle_diadic(back, |a, b| format!("({} * {})", a, b));
-            }
-            Token::Max => {
-                parser.handle_diadic(back, |a, b| format!("max({}, {})", a, b));
-            }
-            Token::Sin => {
-                parser.handle_monadic(|v| format!("sin({})", v));
-            }
-            Token::Abs => {
-                parser.handle_monadic(|v| format!("abs({})", v));
-            }
-            Token::Back => unreachable!(),
-            Token::Comment => {}
         }
     }
 
