@@ -3,10 +3,6 @@
 @group(0) @binding(2) var<storage, read_write> values: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dispatches: array<vec3<u32>>;
 
-fn size_to_length(size: vec3<u32> ) -> u32 {
-    return size.x * size.y * size.z;
-}
-
 fn write_to_buffer(buffer_index: u32, coord: vec3<u32>, value: f32) {
     let buffer = buffers[buffer_index];
     if (any(coord >= buffer.xyz)) {
@@ -29,10 +25,6 @@ fn div_ceil(value: vec3<u32>, divisor: u32) -> vec3<u32> {
 
 fn allocate(location: u32, size: vec3<u32>) {
     buffers[location] = vec4(size, current_offset);
-    current_offset += size_to_length(size);
+    current_offset += size.x * size.y * size.z;
     dispatches[0] = size;//div_ceil(size, 4);
-}
-
-fn copy_buffer(from_index: u32, to_index: u32) {
-    buffers[to_index] = buffers[from_index];
 }

@@ -41,7 +41,7 @@ impl Context {
         }
     }
 
-    async fn run2(&self, shader_code: &str, num_steps: usize) {
+    async fn run(&self, shader_code: &str, num_steps: usize) {
         let shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -168,7 +168,6 @@ impl Context {
         values_rx.await.unwrap();
         buffers_rx.await.unwrap();
         let buffers_range = data_and_buffers_readback.get_mapped_range(..);
-        let stack_len = cast_slice::<u32>(&buffers_range)[0];
         let buffers = cast_slice::<[u32; 4]>(&buffers_range[256..]);
         let values = values_readback.get_mapped_range(..);
         let values = cast_slice::<f32>(&values);
@@ -271,7 +270,7 @@ enum ModifierAccess {
 }
 
 #[derive(Default, Debug)]
-struct Parser2 {
+struct Parser {
     output_size: String,
     functions: Vec<Vec<String>>,
     stack: Vec<StackItem>,
@@ -279,7 +278,7 @@ struct Parser2 {
     modifier_expecting_op: Option<ModifierAccess>,
 }
 
-impl Parser2 {
+impl Parser {
     fn pop(&mut self) -> StackItem {
         self.stack.pop().unwrap()
     }
@@ -299,12 +298,14 @@ impl Parser2 {
 
         for item in &mut self.stack {
             if !item.is_output() {
-                //|| item.is_duplicate {
                 continue;
             }
 
             if let Some(index) = command_to_buffer_index.get(&item.str("thread_id")) {
-                admin_commands.push(format!("copy_buffer({}, {})", index, self.num_allocated));
+                admin_commands.push(format!(
+                    "buffers[{}] = buffers[{}]",
+                    self.num_allocated, index
+                ));
             } else {
                 command_to_buffer_index.insert(item.str("thread_id"), self.num_allocated);
 
@@ -378,7 +379,7 @@ impl Parser2 {
 fn main() {
     let input = std::env::args().nth(1).unwrap();
 
-    let mut parser = Parser2::default();
+    let mut parser = Parser::default();
 
     let mut lexer = Token::lexer(&input);
 
@@ -474,7 +475,7 @@ fn main() {
 
     let context = pollster::block_on(Context::new());
 
-    pollster::block_on(context.run2(&code, parser.functions.len()));
+    pollster::block_on(context.run(&code, parser.functions.len()));
 }
 
 fn cast_slice<T>(slice: &[u8]) -> &[T] {
