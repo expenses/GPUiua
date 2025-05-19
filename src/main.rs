@@ -3,41 +3,59 @@ struct ShaderModule {
     num_functions: usize,
 }
 
-fn generate_module<'a, I: Iterator<Item = &'a Code>>(iter: I) -> ShaderModule {
+fn generate_module(blocks: Vec<CodeBlock>) -> ShaderModule {
     let mut parser = Parser::default();
 
-    for code in iter {
-        match code {
-            Code::Value(val) => parser.stack.push(StackItem::Other {
-                str: val.to_string(),
+    for code in blocks {
+        dbg!(&code);
+
+        let mut back = false;
+        let mut dipped = Vec::new();
+
+        for modifier in code.modifiers {
+            match modifier {
+                Modifier::Gap => {
+                    parser.stack.pop();
+                }
+                Modifier::Dip => {
+                    parser.finish_write();
+                    dipped.push(parser.stack.pop().unwrap());
+                }
+                Modifier::Back => back = !back,
+                Modifier::Table => {
+                    parser.finish_write();
+                    let a = parser.peek(0);
+                    let b = parser.peek(1);
+                    parser.output_size = format!(
+                        "coord_max({0}, Coord({1}[1], {1}[0], {1}[2], {1}[3]))",
+                        a.size(),
+                        b.size()
+                    );
+                    parser.modifier_expecting_op = Some(ModifierAccess::Transpose);
+                }
+            }
+        }
+
+        match code.code {
+            FunctionOrOp::Function(_) => panic!(),
+            FunctionOrOp::Op(Op::Value(val)) => parser.stack.push(StackItem::Other {
+                str: format!("f32({})", val),
                 is_output: false,
             }),
-            Code::Dup => {
+            FunctionOrOp::Op(Op::Dup) => {
                 let top = parser.stack.last().unwrap().clone();
                 parser.stack.push(top);
             }
-            Code::Range => {
+            FunctionOrOp::Op(Op::Range) => {
                 parser.finish_write();
                 let len = parser.pop();
-                parser.output_size = format!("Coord({}, 1, 1, 1)", len.str("unreachable!"));
+                parser.output_size = format!("Coord(u32({}), 1, 1, 1)", len.str("unreachable!"));
                 parser.stack.push(StackItem::Other {
                     str: "f32(thread_id[0])".to_owned(),
                     is_output: true,
                 });
             }
-            Code::Table(op) => {
-                parser.finish_write();
-                let a = parser.peek(0);
-                let b = parser.peek(1);
-                parser.output_size = format!(
-                    "coord_max({0}, Coord({1}[1], {1}[0], {1}[2], {1}[3]))",
-                    a.size(),
-                    b.size()
-                );
-                parser.modifier_expecting_op = Some(ModifierAccess::Transpose);
-                parser.handle_operation(op);
-            }
-            Code::Rev => {
+            FunctionOrOp::Op(Op::Rev) => {
                 parser.finish_write();
                 let v = parser.peek(0);
                 let size = v.size();
@@ -51,7 +69,11 @@ fn generate_module<'a, I: Iterator<Item = &'a Code>>(iter: I) -> ShaderModule {
                 });
                 parser.output_size = size;
             }
-            Code::Operation(operation) => parser.handle_operation(operation),
+            FunctionOrOp::Op(Op::BasicOp(operation)) => parser.handle_operation(back, operation),
+        }
+
+        while let Some(item) = dipped.pop() {
+            parser.stack.push(item);
         }
     }
 
@@ -306,11 +328,7 @@ impl Context {
     }
 
     async fn run_string(&self, string: &str, left_to_right: bool) -> String {
-        let module = if left_to_right {
-            generate_module(parse_code(string).iter().flat_map(|line| line.iter()))
-        } else {
-            generate_module(parse_code(string).iter().flat_map(|line| line.iter().rev()))
-        };
+        let module = generate_module(parse_code(string, left_to_right));
 
         log::debug!("{}", module.code);
 
@@ -333,26 +351,46 @@ enum OpType {
     Round,
     Abs,
     Max,
+    Floor,
+    Ceil,
 }
 
 #[derive(Debug)]
-struct Operation {
-    ty: OpType,
-    back: bool,
+struct CodeBlock {
+    modifiers: Vec<Modifier>,
+    code: FunctionOrOp,
 }
 
 #[derive(Debug)]
-enum Code {
-    Operation(Operation),
+enum FunctionOrOp {
+    Function(Vec<CodeBlock>),
+    Op(Op),
+}
+
+#[derive(Debug)]
+enum Op {
+    BasicOp(OpType),
     Value(f32),
-    Table(Operation),
+    Range,
     Rev,
     Dup,
-    Range,
+}
+
+#[derive(Debug)]
+enum Modifier {
+    Table,
+    Back,
+    Gap,
+    Dip,
+}
+
+enum TokenType {
+    Modifier(Modifier),
+    Op(Op),
 }
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
-#[logos(skip r"\s+")]
+#[logos(skip r"[ \t]+")]
 enum Token {
     #[regex(r"add|\+")]
     Add,
@@ -374,7 +412,7 @@ enum Token {
     Rev,
     #[regex(r"max|↥")]
     Max,
-    #[regex(r"round")]
+    #[regex(r"round|⁅")]
     Round,
     #[regex("sub|-")]
     Sub,
@@ -382,99 +420,90 @@ enum Token {
     Back,
     #[regex(r"dup|\.")]
     Dup,
+    #[regex(r"gap")]
+    Gap,
+    #[regex(r"dip")]
+    Dip,
+    #[regex(r"floor|⌊")]
+    Floor,
+    #[regex(r"ceil|⌈")]
+    Ceil,
     #[regex("#[^\n]*")]
     Comment,
-    #[token("\n", priority = 3)]
+    #[token("\n")]
     LineBreak,
-    #[regex(r"[0-9]+\.?[0-9]*", |lex| lex.slice().parse::<f32>().unwrap())]
+    #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
 }
 
-fn parse_as_op(token: Token) -> Option<OpType> {
-    match token {
-        Token::Eq => Some(OpType::Eq),
-        Token::Abs => Some(OpType::Abs),
-        Token::Add => Some(OpType::Add),
-        Token::Mul => Some(OpType::Mul),
-        Token::Div => Some(OpType::Div),
-        Token::Sin => Some(OpType::Sin),
-        Token::Max => Some(OpType::Max),
-        Token::Sub => Some(OpType::Sub),
-        Token::Round => Some(OpType::Round),
-        Token::LineBreak
-        | Token::Dup
-        | Token::Value(_)
-        | Token::Back
-        | Token::Range
-        | Token::Table
-        | Token::Rev
-        | Token::Comment => None,
-    }
+fn parse(token: Token) -> Option<TokenType> {
+    Some(match token {
+        Token::Eq => TokenType::Op(Op::BasicOp(OpType::Eq)),
+        Token::Abs => TokenType::Op(Op::BasicOp(OpType::Abs)),
+        Token::Add => TokenType::Op(Op::BasicOp(OpType::Add)),
+        Token::Mul => TokenType::Op(Op::BasicOp(OpType::Mul)),
+        Token::Div => TokenType::Op(Op::BasicOp(OpType::Div)),
+        Token::Sin => TokenType::Op(Op::BasicOp(OpType::Sin)),
+        Token::Max => TokenType::Op(Op::BasicOp(OpType::Max)),
+        Token::Sub => TokenType::Op(Op::BasicOp(OpType::Sub)),
+        Token::Round => TokenType::Op(Op::BasicOp(OpType::Round)),
+        Token::Floor => TokenType::Op(Op::BasicOp(OpType::Floor)),
+        Token::Ceil => TokenType::Op(Op::BasicOp(OpType::Ceil)),
+        Token::Table => TokenType::Modifier(Modifier::Table),
+        Token::Back => TokenType::Modifier(Modifier::Back),
+        Token::Gap => TokenType::Modifier(Modifier::Gap),
+        Token::Dip => TokenType::Modifier(Modifier::Dip),
+        Token::Range => TokenType::Op(Op::Range),
+        Token::Dup => TokenType::Op(Op::Dup),
+        Token::Rev => TokenType::Op(Op::Rev),
+        Token::Value(value) => TokenType::Op(Op::Value(value)),
+        Token::Comment | Token::LineBreak => return None,
+    })
 }
 
-type Line = Vec<Code>;
+fn parse_code(code: &str, left_to_right: bool) -> Vec<CodeBlock> {
+    code.lines()
+        .flat_map(|line| parse_code_blocks(Token::lexer(line).spanned(), left_to_right))
+        .collect()
+}
 
-fn parse_code(input: &str) -> Vec<Line> {
-    let mut code = Vec::new();
-    let mut line = Vec::new();
+fn parse_code_blocks(mut lexer: logos::SpannedIter<Token>, left_to_right: bool) -> Vec<CodeBlock> {
+    let mut blocks = Vec::new();
 
-    let mut lexer = Token::lexer(input);
+    while let Some(block) = parse_code_block(&mut lexer) {
+        blocks.push(block);
+    }
 
-    while let Some(token) = lexer.next() {
-        let mut token = match token {
+    if !left_to_right {
+        blocks.reverse();
+    }
+
+    blocks
+}
+
+fn parse_code_block(lexer: &mut logos::SpannedIter<Token>) -> Option<CodeBlock> {
+    let mut modifiers = Vec::new();
+
+    for (token, span) in lexer {
+        let token = match token {
             Ok(token) => token,
-            Err(error) => panic!("{:?}: {:?}", error, code),
+            Err(()) => panic!("{:?}", span),
         };
 
-        let mut back = false;
-
-        while token == Token::Back {
-            back = !back;
-            token = lexer.next().unwrap().unwrap();
-        }
-
-        match token {
-            Token::Comment => {}
-            Token::Back => unreachable!(),
-            Token::Value(value) => line.push(Code::Value(value)),
-            Token::Range => line.push(Code::Range),
-            Token::Dup => line.push(Code::Dup),
-            Token::Rev => line.push(Code::Rev),
-            Token::Table => line.push(Code::Table({
-                let mut token = lexer.next().unwrap().unwrap();
-                let mut back = false;
-
-                while token == Token::Back {
-                    back = !back;
-                    token = lexer.next().unwrap().unwrap();
-                }
-
-                Operation {
-                    ty: match parse_as_op(token) {
-                        Some(op) => op,
-                        None => panic!("{:?}", token),
-                    },
-                    back,
-                }
-            })),
-            Token::LineBreak => {
-                code.push(std::mem::take(&mut line));
+        match parse(token) {
+            None => {}
+            Some(TokenType::Modifier(modifier)) => modifiers.push(modifier),
+            Some(TokenType::Op(op)) => {
+                return Some(CodeBlock {
+                    modifiers,
+                    code: FunctionOrOp::Op(op),
+                });
             }
-            other => line.push(Code::Operation(Operation {
-                ty: match parse_as_op(other) {
-                    Some(op) => op,
-                    None => panic!("{:?}", other),
-                },
-                back,
-            })),
+            _ => panic!(),
         }
     }
 
-    if !line.is_empty() {
-        code.push(line);
-    }
-
-    code
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -621,25 +650,25 @@ impl Parser {
         })
     }
 
-    fn handle_operation(&mut self, operation: &Operation) {
-        match operation.ty {
+    fn handle_operation(&mut self, back: bool, operation: OpType) {
+        match operation {
             OpType::Add => {
-                self.handle_diadic(operation.back, |a, b| format!("({} + {})", a, b));
+                self.handle_diadic(back, |a, b| format!("({} + {})", a, b));
             }
             OpType::Eq => {
-                self.handle_diadic(operation.back, |a, b| format!("f32({} == {})", a, b));
+                self.handle_diadic(back, |a, b| format!("f32({} == {})", a, b));
             }
             OpType::Div => {
-                self.handle_diadic(operation.back, |a, b| format!("({} / {})", a, b));
+                self.handle_diadic(back, |a, b| format!("({} / {})", a, b));
             }
             OpType::Mul => {
-                self.handle_diadic(operation.back, |a, b| format!("({} * {})", a, b));
+                self.handle_diadic(back, |a, b| format!("({} * {})", a, b));
             }
             OpType::Sub => {
-                self.handle_diadic(operation.back, |a, b| format!("({} - {})", a, b));
+                self.handle_diadic(back, |a, b| format!("({} - {})", a, b));
             }
             OpType::Max => {
-                self.handle_diadic(operation.back, |a, b| format!("max({}, {})", a, b));
+                self.handle_diadic(back, |a, b| format!("max({}, {})", a, b));
             }
             OpType::Sin => {
                 self.handle_monadic(|v| format!("sin({})", v));
@@ -649,6 +678,12 @@ impl Parser {
             }
             OpType::Round => {
                 self.handle_monadic(|v| format!("round({})", v));
+            }
+            OpType::Floor => {
+                self.handle_monadic(|v| format!("floor({})", v));
+            }
+            OpType::Ceil => {
+                self.handle_monadic(|v| format!("ceil({})", v));
             }
         }
     }
@@ -669,7 +704,7 @@ fn main() {
     #[cfg(target_arch = "wasm32")]
     {
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-        console_log::init().expect("could not initialize logger");
+        console_log::init_with_level(log::Level::Trace).expect("could not initialize logger");
         use leptos::prelude::*;
         wasm_bindgen_futures::spawn_local(async {
             let context = std::rc::Rc::new(Context::new().await);
