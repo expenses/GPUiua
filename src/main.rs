@@ -406,6 +406,7 @@ enum DyadicOp {
 enum StackOp {
     Dup,
     Pop,
+    Ident,
 }
 
 #[derive(Clone, Debug)]
@@ -424,6 +425,7 @@ impl FunctionOrOp {
             Self::Op(Op::Dyadic(_)) => -1,
             Self::Op(Op::Value(_)) => 1,
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
+            Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
             Self::Op(Op::Rev) => 0,
             Self::Op(Op::Range) => 0,
@@ -495,7 +497,7 @@ enum Token {
     Back,
     #[regex(r"dup|\.")]
     Dup,
-    #[regex(r"gap")]
+    #[regex(r"gap|⋅")]
     Gap,
     #[regex(r"dip")]
     Dip,
@@ -505,6 +507,8 @@ enum Token {
     Floor,
     #[regex(r"ceil|⌈")]
     Ceil,
+    #[regex(r"ident|∘")]
+    Ident,
     #[regex("#[^\n]*")]
     Comment,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
@@ -536,6 +540,7 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Dip => TokenType::Modifier(Modifier::Dip),
         Token::Range => TokenType::Op(Op::Range),
         Token::Rev => TokenType::Op(Op::Rev),
+        Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
         Token::Comment | Token::OpenParen | Token::CloseParen => return None,
     })
@@ -679,7 +684,6 @@ fn handle_op(
                     let x = dag.stack.get(dag.stack.len() - 1).unwrap();
                     let y = dag.stack.get(dag.stack.len() - 2).unwrap();
                     table_of_size = Some(Size::TransposeSizeOf(*x, *y));
-                    assert_eq!(code.iter().map(|op| op.stack_delta()).sum::<i32>(), -1);
                 }
             }
 
@@ -704,6 +708,13 @@ fn handle_op(
         }
         FunctionOrOp::Op(Op::Stack(StackOp::Pop)) => {
             dag.stack.pop();
+        }
+        FunctionOrOp::Op(Op::Stack(StackOp::Ident)) => {
+            // Potentially change size of the node on the top of the stack.
+            let index = dag.stack.pop().unwrap();
+            let mut node = dag.inner[index].clone();
+            node.size = table_of_size.unwrap_or(node.size);
+            insert_node(&mut dag, vec![index], node);
         }
         FunctionOrOp::Op(Op::Range) => {
             let parent_index = dag.stack.pop().unwrap();
@@ -893,7 +904,7 @@ fn evaluate_size(
         }
         Size::Scalar => format!("Coord(1,1,1,1)"),
         Size::TransposeSizeOf(a, b) => format!(
-            "coord_max(Coord({0}[1], {0}[0], {0}[2], {0}[3]), {1})",
+            "coord_max(coord_transpose({}), {})",
             evaluate_size(dag, functions, full_eval_to, *a),
             evaluate_size(dag, functions, full_eval_to, *b)
         ),
@@ -967,6 +978,7 @@ struct ReadBackValue {
     values: Vec<f32>,
 }
 
+#[cfg(test)]
 impl ReadBackValue {
     fn scalar(value: f32) -> Self {
         Self {
@@ -1016,6 +1028,22 @@ fn scalar_values() {
     assert_output(
         "16.6 3",
         vec![ReadBackValue::scalar(3.0), ReadBackValue::scalar(16.6)],
+    );
+}
+
+#[test]
+fn regular_ident() {
+    assert_output("ident 3", vec![ReadBackValue::scalar(3.0)]);
+}
+
+#[test]
+fn table_ident() {
+    assert_output(
+        "⊞⋅⋅∘ . ⇡ . 3",
+        vec![ReadBackValue {
+            size: [3, 3, 1, 1],
+            values: vec![3.0; 9],
+        }],
     );
 }
 
