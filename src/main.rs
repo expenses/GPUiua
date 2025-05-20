@@ -393,7 +393,7 @@ enum MonadicOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum DiadicOp {
+enum DyadicOp {
     Add,
     Mul,
     Div,
@@ -421,7 +421,7 @@ impl FunctionOrOp {
     fn stack_delta(&self) -> i32 {
         match self {
             Self::Op(Op::Monadic(_)) => 0,
-            Self::Op(Op::Diadic(_)) => -1,
+            Self::Op(Op::Dyadic(_)) => -1,
             Self::Op(Op::Value(_)) => 1,
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
@@ -444,7 +444,7 @@ impl FunctionOrOp {
 #[derive(Debug, Clone, Copy)]
 enum Op {
     Monadic(MonadicOp),
-    Diadic(DiadicOp),
+    Dyadic(DyadicOp),
     Stack(StackOp),
     Value(f32),
     Range,
@@ -517,14 +517,14 @@ enum Token {
 
 fn parse(token: Token) -> Option<TokenType> {
     Some(match token {
-        Token::Eq => TokenType::Op(Op::Diadic(DiadicOp::Eq)),
+        Token::Eq => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
         Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
-        Token::Add => TokenType::Op(Op::Diadic(DiadicOp::Add)),
-        Token::Mul => TokenType::Op(Op::Diadic(DiadicOp::Mul)),
-        Token::Div => TokenType::Op(Op::Diadic(DiadicOp::Div)),
+        Token::Add => TokenType::Op(Op::Dyadic(DyadicOp::Add)),
+        Token::Mul => TokenType::Op(Op::Dyadic(DyadicOp::Mul)),
+        Token::Div => TokenType::Op(Op::Dyadic(DyadicOp::Div)),
         Token::Sin => TokenType::Op(Op::Monadic(MonadicOp::Sin)),
-        Token::Max => TokenType::Op(Op::Diadic(DiadicOp::Max)),
-        Token::Sub => TokenType::Op(Op::Diadic(DiadicOp::Sub)),
+        Token::Max => TokenType::Op(Op::Dyadic(DyadicOp::Max)),
+        Token::Sub => TokenType::Op(Op::Dyadic(DyadicOp::Sub)),
         Token::Round => TokenType::Op(Op::Monadic(MonadicOp::Round)),
         Token::Floor => TokenType::Op(Op::Monadic(MonadicOp::Floor)),
         Token::Ceil => TokenType::Op(Op::Monadic(MonadicOp::Ceil)),
@@ -617,7 +617,7 @@ fn parse_code_block(
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 enum NodeOp {
     Monadic(MonadicOp),
-    Diadic { is_table: bool, op: DiadicOp },
+    Dyadic { is_table: bool, op: DyadicOp },
     Range,
     Rev,
     Value(ordered_float::OrderedFloat<f32>),
@@ -740,13 +740,13 @@ fn handle_op(
                 },
             );
         }
-        FunctionOrOp::Op(Op::Diadic(op)) => {
+        FunctionOrOp::Op(Op::Dyadic(op)) => {
             let x = dag.stack.pop().unwrap();
             let y = dag.stack.pop().unwrap();
             let x_val = &dag.inner[x];
             let y_val = &dag.inner[y];
             let node = Node {
-                op: NodeOp::Diadic {
+                op: NodeOp::Dyadic {
                     is_table: table_of_size.is_some(),
                     op,
                 },
@@ -822,7 +822,7 @@ fn evaluate_scalar(
                 dag.parents(index).walk_next(dag).unwrap().1
             )
         ),
-        NodeOp::Diadic { op, is_table } => {
+        NodeOp::Dyadic { op, is_table } => {
             let mut parents = dag.parents(index);
             let mut arg_0 = evaluate_scalar(
                 dag,
@@ -1068,10 +1068,10 @@ fn function_delta() {
     assert_eq!(
         FunctionOrOp::Function {
             modifier: Modifier::Table,
-            code: vec![FunctionOrOp::Op(Op::Diadic(DiadicOp::Eq))]
+            code: vec![FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq))]
         }
         .stack_delta(),
         -1
     );
-    assert_eq!(FunctionOrOp::Op(Op::Diadic(DiadicOp::Eq)).stack_delta(), -1)
+    assert_eq!(FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq)).stack_delta(), -1)
 }
