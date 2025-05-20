@@ -343,8 +343,10 @@ impl Context {
         string: &str,
         left_to_right: bool,
     ) -> Result<Vec<ReadBackValue>, String> {
-        let module =
-            generate_module(parse_code(string, left_to_right).map_err(|err| format!("{:?}", err))?);
+        let module = generate_module(
+            parse_code(string, left_to_right)
+                .map_err(|(str, span)| format!("'{}' {:?}", str, span))?,
+        );
         log::debug!("{}", module.code);
         Ok(self.run(&module).await)
     }
@@ -463,14 +465,17 @@ enum Modifier {
     By,
 }
 
-enum TokenType {
+enum TokenType<'a> {
     Modifier(Modifier),
     Op(Op),
+    AssignedOp(&'a str),
 }
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"[ \t]+")]
-enum Token {
+enum Token<'source> {
+    #[regex(r"[a-zA-Z_]+[a-zA-Z_0-9]*", priority = 0)]
+    String(&'source str),
     #[regex(r"add|\+")]
     Add,
     #[regex(r"mul|\*")]
@@ -544,6 +549,7 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Range => TokenType::Op(Op::Range),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
+        Token::String(string) => TokenType::AssignedOp(string),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
         Token::OpenParen | Token::CloseParen => return None,
     })
@@ -551,27 +557,55 @@ fn parse(token: Token) -> Option<TokenType> {
 
 fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, (&str, Range<usize>)> {
     let mut parsed_code = Vec::new();
+    let mut assignments: HashMap<&str, Vec<FunctionOrOp>> = HashMap::new();
     for line in code.lines() {
         let line = line
             .split_once('#')
             .map(|(before_comment, _)| before_comment)
             .unwrap_or(line);
-        let blocks = parse_code_blocks(Token::lexer(line).spanned().peekable(), left_to_right)
-            .map_err(|span| (line, span))?;
-        parsed_code.extend_from_slice(&blocks);
+        let mut lexer = Token::lexer(line).spanned().peekable();
+
+        if let Some((Ok(Token::String(name)), span)) = lexer.peek().cloned() {
+            if assignments.contains_key(name) {
+                let blocks = parse_code_blocks(lexer, left_to_right, &assignments)
+                    .map_err(|span| (line, span))?;
+                parsed_code.extend_from_slice(&blocks);
+            } else {
+                let _ = lexer.next().unwrap();
+                match lexer.next() {
+                    Some((Ok(Token::Eq), _)) => {}
+                    Some((_, span)) => return Err((line, span)),
+                    None => {
+                        return Err((line, span));
+                    }
+                }
+                let blocks =
+                    parse_code_blocks(lexer, true, &assignments).map_err(|span| (line, span))?;
+                assignments.insert(name, blocks);
+            }
+        } else {
+            let blocks = parse_code_blocks(lexer, left_to_right, &assignments)
+                .map_err(|span| (line, span))?;
+            parsed_code.extend_from_slice(&blocks);
+        }
     }
 
     Ok(parsed_code)
 }
 
-fn parse_code_blocks(
-    mut lexer: std::iter::Peekable<logos::SpannedIter<Token>>,
+fn parse_code_blocks<'a>(
+    mut lexer: std::iter::Peekable<logos::SpannedIter<'a, Token<'a>>>,
     left_to_right: bool,
+    assignments: &HashMap<&str, Vec<FunctionOrOp>>,
 ) -> Result<Vec<FunctionOrOp>, Range<usize>> {
     let mut blocks = Vec::new();
 
-    while let Some(block) = parse_code_block(&mut lexer, left_to_right)? {
-        blocks.push(block);
+    loop {
+        let parsed_blocks = parse_code_blocks_inner(&mut lexer, left_to_right, assignments)?;
+        if parsed_blocks.is_empty() {
+            break;
+        }
+        blocks.extend_from_slice(&parsed_blocks);
     }
 
     if !left_to_right {
@@ -581,18 +615,22 @@ fn parse_code_blocks(
     Ok(blocks)
 }
 
-fn parse_code_block(
-    lexer: &mut std::iter::Peekable<logos::SpannedIter<Token>>,
+fn parse_code_blocks_inner<'a>(
+    lexer: &mut std::iter::Peekable<logos::SpannedIter<'a, Token<'a>>>,
     left_to_right: bool,
-) -> Result<Option<FunctionOrOp>, Range<usize>> {
+    assignments: &HashMap<&str, Vec<FunctionOrOp>>,
+) -> Result<Vec<FunctionOrOp>, Range<usize>> {
     let (token, span) = match lexer.next() {
         Some((Ok(token), span)) => (token, span),
         Some((Err(()), span)) => return Err(span),
-        None => return Ok(None),
+        None => return Ok(vec![]),
     };
 
     match parse(token) {
-        Some(TokenType::Op(op)) => return Ok(Some(FunctionOrOp::Op(op))),
+        Some(TokenType::AssignedOp(name)) => {
+            return Ok(assignments.get(name).unwrap().clone());
+        }
+        Some(TokenType::Op(op)) => return Ok(vec![FunctionOrOp::Op(op)]),
         Some(TokenType::Modifier(modifier)) => {
             if let Some(&(Ok(Token::OpenParen), _)) = lexer.peek() {
                 let _ = lexer.next();
@@ -603,24 +641,28 @@ fn parse_code_block(
                         if !left_to_right {
                             code.reverse();
                         }
-                        return Ok(Some(FunctionOrOp::Function { modifier, code }));
+                        return Ok(vec![FunctionOrOp::Function { modifier, code }]);
                     }
 
-                    code.push(match parse_code_block(lexer, left_to_right) {
-                        Ok(None) => return Err(span),
-                        Ok(Some(op)) => op,
+                    code.extend_from_slice(&match parse_code_blocks_inner(
+                        lexer,
+                        left_to_right,
+                        assignments,
+                    ) {
+                        Ok(ops) if ops.is_empty() => return Err(span),
+                        Ok(ops) => ops,
                         Err(span) => return Err(span),
                     })
                 }
             } else {
-                return Ok(Some(FunctionOrOp::Function {
+                return Ok(vec![FunctionOrOp::Function {
                     modifier,
-                    code: vec![match parse_code_block(lexer, left_to_right) {
-                        Ok(None) => return Err(span),
-                        Ok(Some(op)) => op,
+                    code: match parse_code_blocks_inner(lexer, left_to_right, assignments) {
+                        Ok(ops) if ops.is_empty() => return Err(span),
+                        Ok(ops) => ops,
                         Err(span) => return Err(span),
-                    }],
-                }));
+                    },
+                }]);
             }
         }
         None => return Err(span),
@@ -1036,6 +1078,24 @@ fn identity_matrix_cross() {
                 1.0, 0.0, 0.0, 0.0, 1.0,
             ],
         }],
+    );
+}
+
+#[test]
+fn assignments() {
+    assert_output(
+        "
+            xyz = +5
+            xyz 5
+        ",
+        vec![ReadBackValue::scalar(10.0)],
+    );
+    assert_output(
+        "
+            div_new = div
+            back div_new 10 1
+        ",
+        vec![ReadBackValue::scalar(10.0)],
     );
 }
 
