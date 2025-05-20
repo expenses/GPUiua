@@ -164,3 +164,23 @@ fn mul(x: f32, y: f32) -> f32 {
 fn sub(x: f32, y: f32) -> f32 {
     return x - y;
 }
+
+fn ge(x: f32, y: f32) -> f32 {
+    return f32(x >= y);
+}
+
+fn gt(x: f32, y: f32) -> f32 {
+    return f32(x > y);
+}
+
+fn lt(x: f32, y: f32) -> f32 {
+    return f32(x < y);
+}
+
+fn le(x: f32, y: f32) -> f32 {
+    return f32(x <= y);
+}
+
+fn ne(x: f32, y: f32) -> f32 {
+    return f32(x != y);
+}

@@ -9,25 +9,23 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         .enumerate()
         .map(|(i, &index)| (index, i))
         .collect();
-    let mut i = 50;
+    let mut dummy_buffer_index = final_stack.len();
     for index in dag.graph().node_indices() {
         let node = &dag[index];
         // todo: check if this value is actually reachable
-        match node {
-            Node {
-                op: NodeOp::Rand,
-                size: Size::Scalar, //Size::TransposeSizeOf(_, _),
-            } => {
-                // doesn't work. would need to walk whole tree and see if output is also scalar.
-                //let all_children_scalar = dag.children(index).iter(&dag).all(|(_, child)| dag[child].size == Size::Scalar);
-                //if all_children_scalar {
-                //    continue;
-                //}
+        if let Node {
+            op: NodeOp::Rand,
+            size: Size::Scalar, //Size::TransposeSizeOf(_, _),
+        } = node
+        {
+            // doesn't work. would need to walk whole tree and see if output is also scalar.
+            //let all_children_scalar = dag.children(index).iter(&dag).all(|(_, child)| dag[child].size == Size::Scalar);
+            //if all_children_scalar {
+            //    continue;
+            //}
 
-                full_eval_to.insert(index, i);
-                i += 1
-            }
-            _ => {}
+            full_eval_to.insert(index, dummy_buffer_index);
+            dummy_buffer_index += 1;
         }
     }
 
@@ -55,7 +53,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
             Size::Scalar => {
                 code_builder.functions[0]
                     .admin_lines
-                    .push(format!("random_seed += 1"));
+                    .push("random_seed += 1".to_string());
                 code_builder.functions[0].admin_lines.push(format!(
                     "write_to_buffer({}, Coord(0,0,0,0), {})",
                     i,
@@ -104,7 +102,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     }
 
     for (i, item) in final_stack.iter().enumerate() {
-        let allocation = node_to_allocation[&item];
+        let allocation = node_to_allocation[item];
         if i == allocation {
             continue;
         }
@@ -443,6 +441,11 @@ enum DyadicOp {
     Eq,
     Sub,
     Max,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Ne,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -564,6 +567,16 @@ enum Token<'source> {
     Ident,
     #[regex(r"by|⊸")]
     By,
+    #[regex(r"gt")]
+    Gt,
+    #[regex(r"ge")]
+    Ge,
+    #[regex(r"lt")]
+    Lt,
+    #[regex(r"le")]
+    Le,
+    #[regex(r"ne")]
+    Ne,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -575,6 +588,11 @@ enum Token<'source> {
 fn parse(token: Token) -> Option<TokenType> {
     Some(match token {
         Token::Rand => TokenType::Op(Op::Rand),
+        Token::Gt => TokenType::Op(Op::Dyadic(DyadicOp::Gt)),
+        Token::Ge => TokenType::Op(Op::Dyadic(DyadicOp::Ge)),
+        Token::Lt => TokenType::Op(Op::Dyadic(DyadicOp::Lt)),
+        Token::Le => TokenType::Op(Op::Dyadic(DyadicOp::Le)),
+        Token::Ne => TokenType::Op(Op::Dyadic(DyadicOp::Ne)),
         Token::Eq => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
         Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
         Token::Add => TokenType::Op(Op::Dyadic(DyadicOp::Add)),
