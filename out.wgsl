@@ -184,3 +184,11 @@ fn le(x: f32, y: f32) -> f32 {
 fn ne(x: f32, y: f32) -> f32 {
     return f32(x != y);
 }
+
+fn not(v: f32) -> f32 {
+    return 1 - v;
+}
+
+fn neg(v: f32) -> f32 {
+    return -v;
+}

@@ -431,6 +431,9 @@ enum MonadicOp {
     Abs,
     Floor,
     Ceil,
+    Not,
+    Sqrt,
+    Neg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -527,7 +530,7 @@ enum Token<'source> {
     Add,
     #[regex(r"mul|\*")]
     Mul,
-    #[regex(r"rand")]
+    #[regex(r"rand|⚂")]
     Rand,
     #[regex(r"div|÷")]
     Div,
@@ -547,6 +550,8 @@ enum Token<'source> {
     Max,
     #[regex(r"round|⁅")]
     Round,
+    #[regex(r"not|¬")]
+    Not,
     #[regex("sub|-")]
     Sub,
     #[regex(r"back|˜")]
@@ -555,9 +560,9 @@ enum Token<'source> {
     Dup,
     #[regex(r"gap|⋅")]
     Gap,
-    #[regex(r"dip")]
+    #[regex(r"dip|⊙")]
     Dip,
-    #[regex(r"pop")]
+    #[regex(r"pop|◌")]
     Pop,
     #[regex(r"floor|⌊")]
     Floor,
@@ -567,16 +572,20 @@ enum Token<'source> {
     Ident,
     #[regex(r"by|⊸")]
     By,
-    #[regex(r"gt")]
+    #[regex(r"gt|>")]
     Gt,
-    #[regex(r"ge")]
+    #[regex(r"ge|≥")]
     Ge,
-    #[regex(r"lt")]
+    #[regex(r"lt|<")]
     Lt,
-    #[regex(r"le")]
+    #[regex(r"le|≤")]
     Le,
-    #[regex(r"ne")]
+    #[regex(r"ne|≠")]
     Ne,
+    #[regex(r"neg|¯")]
+    Neg,
+    #[regex(r"sqrt|√")]
+    Sqrt,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -587,35 +596,38 @@ enum Token<'source> {
 
 fn parse(token: Token) -> Option<TokenType> {
     Some(match token {
-        Token::Rand => TokenType::Op(Op::Rand),
+        Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
+        Token::Not => TokenType::Op(Op::Monadic(MonadicOp::Not)),
+        Token::Neg => TokenType::Op(Op::Monadic(MonadicOp::Neg)),
+        Token::Sin => TokenType::Op(Op::Monadic(MonadicOp::Sin)),
+        Token::Ceil => TokenType::Op(Op::Monadic(MonadicOp::Ceil)),
+        Token::Round => TokenType::Op(Op::Monadic(MonadicOp::Round)),
+        Token::Floor => TokenType::Op(Op::Monadic(MonadicOp::Floor)),
         Token::Gt => TokenType::Op(Op::Dyadic(DyadicOp::Gt)),
         Token::Ge => TokenType::Op(Op::Dyadic(DyadicOp::Ge)),
         Token::Lt => TokenType::Op(Op::Dyadic(DyadicOp::Lt)),
         Token::Le => TokenType::Op(Op::Dyadic(DyadicOp::Le)),
         Token::Ne => TokenType::Op(Op::Dyadic(DyadicOp::Ne)),
         Token::Eq => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
-        Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
         Token::Add => TokenType::Op(Op::Dyadic(DyadicOp::Add)),
         Token::Mul => TokenType::Op(Op::Dyadic(DyadicOp::Mul)),
         Token::Div => TokenType::Op(Op::Dyadic(DyadicOp::Div)),
-        Token::Sin => TokenType::Op(Op::Monadic(MonadicOp::Sin)),
         Token::Max => TokenType::Op(Op::Dyadic(DyadicOp::Max)),
         Token::Sub => TokenType::Op(Op::Dyadic(DyadicOp::Sub)),
-        Token::Round => TokenType::Op(Op::Monadic(MonadicOp::Round)),
-        Token::Floor => TokenType::Op(Op::Monadic(MonadicOp::Floor)),
-        Token::Ceil => TokenType::Op(Op::Monadic(MonadicOp::Ceil)),
+        Token::Sqrt => TokenType::Op(Op::Monadic(MonadicOp::Sqrt)),
         Token::Dup => TokenType::Op(Op::Stack(StackOp::Dup)),
         Token::Pop => TokenType::Op(Op::Stack(StackOp::Pop)),
-        Token::Table => TokenType::Modifier(Modifier::Table),
-        Token::Back => TokenType::Modifier(Modifier::Back),
+        Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
+        Token::By => TokenType::Modifier(Modifier::By),
         Token::Gap => TokenType::Modifier(Modifier::Gap),
         Token::Dip => TokenType::Modifier(Modifier::Dip),
-        Token::By => TokenType::Modifier(Modifier::By),
-        Token::Range => TokenType::Op(Op::Range),
+        Token::Back => TokenType::Modifier(Modifier::Back),
+        Token::Table => TokenType::Modifier(Modifier::Table),
         Token::Rev => TokenType::Op(Op::Rev),
-        Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
-        Token::String(string) => TokenType::AssignedOp(string),
+        Token::Rand => TokenType::Op(Op::Rand),
+        Token::Range => TokenType::Op(Op::Range),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
+        Token::String(string) => TokenType::AssignedOp(string),
         Token::OpenParen | Token::CloseParen => return None,
     })
 }
