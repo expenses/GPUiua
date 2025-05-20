@@ -1,10 +1,24 @@
 fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let (dag, final_stack) = parse_code_to_dag(code);
-    let full_eval_to: HashMap<daggy::NodeIndex, usize> = final_stack
+    let mut full_eval_to: BTreeMap<daggy::NodeIndex, usize> = final_stack
         .iter()
         .enumerate()
         .map(|(i, &index)| (index, i))
         .collect();
+    let mut i = 50;
+    for index in dag.graph().node_indices() {
+        let node = &dag[index];
+        match node {
+            Node {
+                op: NodeOp::Rand,
+                size: Size::TransposeSizeOf(_, _),
+            } => {
+                full_eval_to.insert(index, i);
+                i += 1
+            }
+            _ => {}
+        }
+    }
 
     let mut code_builder = CodeBuilder {
         functions: vec![FunctionPair {
@@ -19,66 +33,70 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     let mut node_to_allocation = HashMap::new();
 
-    for (i, item) in final_stack.iter().enumerate().rev() {
-        if let Some(allocation) = node_to_allocation.get(item) {
-            code_builder.functions[0]
-                .admin_lines
-                .push(format!("buffers[{}] = buffers[{}]", i, allocation));
-        } else {
-            let size = evaluate_size(&dag, &mut code_builder.aux_functions, &full_eval_to, *item);
-            code_builder.functions[0]
-                .admin_lines
-                .push(format!("allocate({}, {})", i, size));
-            node_to_allocation.insert(*item, i);
+    for (&item, &i) in &full_eval_to {
+        let size = evaluate_size(&dag, &mut code_builder.aux_functions, &full_eval_to, item);
+        code_builder.functions[0]
+            .admin_lines
+            .push(format!("allocate({}, {})", i, size));
+        node_to_allocation.insert(item, i);
 
-            match &dag[*item].size {
-                Size::Scalar => {
-                    code_builder.functions[0].admin_lines.push(format!(
-                        "write_to_buffer({}, Coord(0,0,0,0), {})",
+        match &dag[item].size {
+            Size::Scalar => {
+                code_builder.functions[0].admin_lines.push(format!(
+                    "write_to_buffer({}, Coord(0,0,0,0), {})",
+                    i,
+                    evaluate_scalar(
+                        &dag,
+                        &mut code_builder.aux_functions,
+                        &full_eval_to,
+                        true,
+                        item
+                    )
+                ));
+            }
+            _ => {
+                let dispatch_index = *code_builder
+                    .size_to_function_index
+                    .entry(dag[item].size)
+                    .or_insert_with(|| {
+                        let dispatch_index = code_builder.next_dispatch_index;
+                        code_builder.next_dispatch_index += 1;
+
+                        code_builder.functions[dispatch_index]
+                            .admin_lines
+                            .push(format!("dispatch_for_buffer({})", i));
+
+                        code_builder.functions.push(Default::default());
+                        dispatch_index
+                    });
+
+                code_builder.functions[dispatch_index].dispatching_on_buffer_index = Some(i);
+
+                code_builder.functions[dispatch_index]
+                    .work_lines
+                    .push(format!(
+                        "write_to_buffer({}, thread_coord, {})",
                         i,
                         evaluate_scalar(
                             &dag,
                             &mut code_builder.aux_functions,
                             &full_eval_to,
                             true,
-                            *item
+                            item
                         )
                     ));
-                }
-                _ => {
-                    let dispatch_index = *code_builder
-                        .size_to_function_index
-                        .entry(dag[*item].size)
-                        .or_insert_with(|| {
-                            let dispatch_index = code_builder.next_dispatch_index;
-                            code_builder.next_dispatch_index += 1;
-
-                            code_builder.functions[dispatch_index]
-                                .admin_lines
-                                .push(format!("dispatch_for_buffer({})", i));
-
-                            code_builder.functions.push(Default::default());
-                            dispatch_index
-                        });
-
-                    code_builder.functions[dispatch_index].dispatching_on_buffer_index = Some(i);
-
-                    code_builder.functions[dispatch_index]
-                        .work_lines
-                        .push(format!(
-                            "write_to_buffer({}, thread_coord, {})",
-                            i,
-                            evaluate_scalar(
-                                &dag,
-                                &mut code_builder.aux_functions,
-                                &full_eval_to,
-                                true,
-                                *item
-                            )
-                        ));
-                }
             }
         }
+    }
+
+    for (i, item) in final_stack.iter().enumerate() {
+        let allocation = node_to_allocation[&item];
+        if i == allocation {
+            continue;
+        }
+        code_builder.functions[0]
+            .admin_lines
+            .push(format!("buffers[{}] = buffers[{}]", i, allocation));
     }
 
     let mut shader = include_str!("../out.wgsl").to_string();
@@ -109,7 +127,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         shader.push_str(&format!("let dispatch_size = buffers[{}].size;\n", i));
         shader.push_str("let thread_coord = index_to_coord(thread.x, dispatch_size);\n");
 
-        for line in pair.work_lines.iter().rev() {
+        for line in pair.work_lines.iter() {
             shader.push_str(&format!("{};\n", line));
         }
         shader.push_str("}\n");
@@ -377,7 +395,7 @@ impl Context {
 }
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
 };
 
@@ -875,7 +893,7 @@ use daggy::Walker;
 fn evaluate_scalar(
     dag: &daggy::Dag<Node, ()>,
     functions: &mut HashSet<String>,
-    full_eval_to: &HashMap<daggy::NodeIndex, usize>,
+    full_eval_to: &BTreeMap<daggy::NodeIndex, usize>,
     top_level_eval: bool,
     index: NodeIndex,
 ) -> String {
@@ -961,7 +979,7 @@ fn evaluate_scalar(
 fn evaluate_size(
     dag: &daggy::Dag<Node, ()>,
     functions: &mut HashSet<String>,
-    full_eval_to: &HashMap<daggy::NodeIndex, usize>,
+    full_eval_to: &BTreeMap<daggy::NodeIndex, usize>,
     index: NodeIndex,
 ) -> String {
     match &dag[index].size {
