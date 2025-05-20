@@ -1,109 +1,130 @@
+fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
+    let (dag, final_stack) = parse_code_to_dag(code);
+    let full_eval_to: HashMap<daggy::NodeIndex, usize> = final_stack
+        .iter()
+        .enumerate()
+        .map(|(i, &index)| (index, i))
+        .collect();
+
+    let mut code_builder = CodeBuilder {
+        functions: vec![FunctionPair {
+            admin_lines: Vec::new(),
+            work_lines: Vec::new(),
+        }],
+        aux_functions: Default::default(),
+        next_dispatch_index: 0,
+        size_to_function_index: Default::default(),
+    };
+
+    let mut node_to_allocation = HashMap::new();
+
+    for (i, item) in final_stack.iter().enumerate() {
+        if let Some(allocation) = node_to_allocation.get(item) {
+            code_builder.functions[0]
+                .admin_lines
+                .push(format!("buffers[{}] = buffers[{}]", i, allocation));
+        } else {
+            let size = evaluate_size(&dag, &mut code_builder.aux_functions, &full_eval_to, *item);
+            code_builder.functions[0]
+                .admin_lines
+                .push(format!("allocate({}, {})", i, size));
+            node_to_allocation.insert(*item, i);
+
+            match &dag[*item].size {
+                Size::Scalar => {
+                    code_builder.functions[0].admin_lines.push(format!(
+                        "write_to_buffer({}, Coord(0,0,0,0), {})",
+                        i,
+                        evaluate_scalar(
+                            &dag,
+                            &mut code_builder.aux_functions,
+                            &full_eval_to,
+                            true,
+                            *item
+                        )
+                    ));
+                }
+                _ => {
+                    let dispatch_index = *code_builder
+                        .size_to_function_index
+                        .entry(dag[*item].size)
+                        .or_insert_with(|| {
+                            let dispatch_index = code_builder.next_dispatch_index;
+                            code_builder.next_dispatch_index += 1;
+
+                            code_builder.functions[dispatch_index]
+                                .admin_lines
+                                .push(format!("dispatch_for_buffer({})", i));
+                            code_builder.functions[dispatch_index]
+                                .work_lines
+                                .push(format!("let dispatch_size = buffers[{}].size", i));
+                            code_builder.functions[dispatch_index]
+                                .work_lines
+                                .push(format!(
+                                    "let thread_coord = index_to_coord(thread.x, dispatch_size)"
+                                ));
+                            dispatch_index
+                        });
+
+                    code_builder.functions[dispatch_index]
+                        .work_lines
+                        .push(format!(
+                            "write_to_buffer({}, thread_coord, {})",
+                            i,
+                            evaluate_scalar(
+                                &dag,
+                                &mut code_builder.aux_functions,
+                                &full_eval_to,
+                                true,
+                                *item
+                            )
+                        ));
+                    code_builder.next_dispatch_index += 1;
+                }
+            }
+        }
+    }
+
+    let mut shader = include_str!("../out.wgsl").to_string();
+
+    for function in code_builder.aux_functions {
+        shader.push_str(&function);
+        shader.push_str("\n");
+    }
+
+    let mut step_index = 0;
+
+    for pair in &code_builder.functions {
+        shader.push_str(&format!(
+            "@compute @workgroup_size(1,1,1) fn step_{}() {{\n",
+            step_index
+        ));
+        for line in &pair.admin_lines {
+            shader.push_str(&format!("{};\n", line));
+        }
+        shader.push_str("}\n");
+        step_index += 1;
+        shader.push_str(&format!("@compute @workgroup_size(64,1,1) fn step_{}(@builtin(global_invocation_id) thread: vec3<u32>) {{\n", step_index));
+        for line in &pair.work_lines {
+            shader.push_str(&format!("{};\n", line));
+        }
+        shader.push_str("}\n");
+        step_index += 1;
+    }
+
+    println!("{}", shader);
+
+    ShaderModule {
+        code: shader,
+        num_functions: code_builder.functions.len() * 2,
+        final_stack_len: final_stack.len(),
+    }
+}
+
 struct ShaderModule {
     code: String,
     num_functions: usize,
     final_stack_len: usize,
-}
-
-fn generate_module(blocks: Vec<CodeBlock>) -> Result<ShaderModule, CodeBlock> {
-    let mut parser = Parser::default();
-
-    for code in &blocks {
-        let mut back = false;
-        let mut dipped = Vec::new();
-
-        for modifier in &code.modifiers {
-            match modifier {
-                Modifier::Gap => {
-                    parser.stack.pop();
-                }
-                Modifier::Dip => {
-                    //parser.finish_write();
-                    dipped.push(parser.stack.pop().unwrap());
-                }
-                Modifier::Back => back = !back,
-                Modifier::Table => {
-                    parser.finish_write().map_err(|()| code.clone())?;
-                    let a = parser.peek(0);
-                    let b = parser.peek(1);
-                    parser.output_size = format!(
-                        "coord_max({0}, Coord({1}[1], {1}[0], {1}[2], {1}[3]))",
-                        a.size(),
-                        b.size()
-                    );
-                    parser.modifier_expecting_op = Some(ModifierAccess::Transpose);
-                }
-            }
-        }
-
-        match code.code {
-            FunctionOrOp::Function(_) => panic!(),
-            FunctionOrOp::Op(Op::Value(val)) => parser.stack.push(StackItem::Other {
-                str: format!("f32({})", val),
-                is_output: false,
-            }),
-            FunctionOrOp::Op(Op::Range) => {
-                parser.finish_write().map_err(|()| code.clone())?;
-                let len = parser.pop().map_err(|()| code.clone())?;
-                parser.output_size = format!("Coord(u32({}), 1, 1, 1)", len.str("unreachable!"));
-                parser.stack.push(StackItem::Other {
-                    str: "f32(thread_id[0])".to_owned(),
-                    is_output: true,
-                });
-            }
-            FunctionOrOp::Op(Op::Rev) => {
-                parser.finish_write().map_err(|()| code.clone())?;
-                let v = parser.peek(0);
-                let size = v.size();
-                let str = v.str(&format!(
-                    "Coord({}[0] - 1 - thread_id[0], thread_id[1], thread_id[2], thread_id[3])",
-                    v.size()
-                ));
-                parser.delayed_pops.push(parser.stack.len() - 1);
-                parser.stack.push(StackItem::Other {
-                    str,
-                    is_output: true,
-                });
-                parser.output_size = size;
-            }
-
-            FunctionOrOp::Op(Op::BasicOp(ref operation)) => parser
-                .handle_operation(back, *operation)
-                .map_err(|()| code.clone())?,
-        }
-
-        while let Some(item) = dipped.pop() {
-            parser.stack.push(item);
-        }
-    }
-
-    parser
-        .finish()
-        .map_err(|()| blocks.last().unwrap().clone())?;
-
-    let mut code = include_str!("../out.wgsl").to_string();
-
-    for (i, function) in parser.functions.iter().enumerate() {
-        if i % 2 == 1 {
-            code.push_str(&format!("@compute @workgroup_size(64,1,1) fn step_{}(@builtin(global_invocation_id) thread : vec3<u32>) {{\n", i));
-            code.push_str("var thread_id: Coord;\n");
-        } else {
-            code.push_str(&format!(
-                "@compute @workgroup_size(1,1,1) fn step_{}() {{\n",
-                i
-            ));
-        }
-        for line in function {
-            code.push_str(line);
-            code.push_str(";\n");
-        }
-        code.push_str("}\n");
-    }
-
-    Ok(ShaderModule {
-        code,
-        num_functions: parser.functions.len(),
-        final_stack_len: parser.stack.len(),
-    })
 }
 
 struct Context {
@@ -320,8 +341,8 @@ impl Context {
         left_to_right: bool,
     ) -> Result<Vec<ReadBackValue>, String> {
         let module =
-            generate_module(parse_code(string, left_to_right).map_err(|err| format!("{:?}", err))?)
-                .map_err(|err| format!("{:?}", err))?;
+            generate_module(parse_code(string, left_to_right).map_err(|err| format!("{:?}", err))?);
+        log::debug!("{}", module.code);
         Ok(self.run(&module).await)
     }
 
@@ -337,14 +358,13 @@ impl Context {
             match value.size {
                 [1, 1, 1, 1] => output.push_str(&format!("{}\n", value.values[0])),
                 [_, 1, 1, 1] => output.push_str(&format!("{:?}\n", value.values)),
-                [_, y, 1, 1] => {
-                    for chunk in value.values.chunks(y as usize) {
+                [x, _, 1, 1] => {
+                    for chunk in value.values.chunks(x as usize) {
                         output.push_str(&format!("{:?}\n", chunk));
                     }
                     output.push_str("\n");
                 }
-
-                _ => {}
+                _ => panic!(),
             }
         }
 
@@ -352,43 +372,77 @@ impl Context {
     }
 }
 
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
+use daggy::NodeIndex;
 use logos::Logos;
 
-#[derive(Debug, Clone, Copy)]
-enum OpType {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MonadicOp {
+    Sin,
+    Round,
+    Abs,
+    Floor,
+    Ceil,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DiadicOp {
     Add,
     Mul,
     Div,
     Eq,
-    Sin,
     Sub,
-    Round,
-    Abs,
     Max,
-    Floor,
-    Ceil,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StackOp {
     Dup,
     Pop,
 }
 
-#[derive(Debug, Clone)]
-struct CodeBlock {
-    modifiers: Vec<Modifier>,
-    span: std::ops::Range<usize>,
-    code: FunctionOrOp,
+#[derive(Clone, Debug)]
+enum FunctionOrOp {
+    Op(Op),
+    Function {
+        modifier: Modifier,
+        code: Vec<FunctionOrOp>,
+    },
 }
 
-#[derive(Debug, Clone)]
-enum FunctionOrOp {
-    Function(Vec<CodeBlock>),
-    Op(Op),
+impl FunctionOrOp {
+    fn stack_delta(&self) -> i32 {
+        match self {
+            Self::Op(Op::Monadic(_)) => 0,
+            Self::Op(Op::Diadic(_)) => -1,
+            Self::Op(Op::Value(_)) => 1,
+            Self::Op(Op::Stack(StackOp::Dup)) => 1,
+            Self::Op(Op::Stack(StackOp::Pop)) => -1,
+            Self::Op(Op::Rev) => 0,
+            Self::Op(Op::Range) => 0,
+            Self::Function { modifier, code } => {
+                let modifier = match *modifier {
+                    Modifier::Back => 0,
+                    Modifier::Dip => 0,
+                    Modifier::Table => 0,
+                    Modifier::Gap => -1,
+                };
+
+                modifier + code.iter().map(|op| op.stack_delta()).sum::<i32>()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Op {
-    BasicOp(OpType),
+    Monadic(MonadicOp),
+    Diadic(DiadicOp),
+    Stack(StackOp),
     Value(f32),
     Range,
     Rev,
@@ -458,19 +512,19 @@ enum Token {
 
 fn parse(token: Token) -> Option<TokenType> {
     Some(match token {
-        Token::Eq => TokenType::Op(Op::BasicOp(OpType::Eq)),
-        Token::Abs => TokenType::Op(Op::BasicOp(OpType::Abs)),
-        Token::Add => TokenType::Op(Op::BasicOp(OpType::Add)),
-        Token::Mul => TokenType::Op(Op::BasicOp(OpType::Mul)),
-        Token::Div => TokenType::Op(Op::BasicOp(OpType::Div)),
-        Token::Sin => TokenType::Op(Op::BasicOp(OpType::Sin)),
-        Token::Max => TokenType::Op(Op::BasicOp(OpType::Max)),
-        Token::Sub => TokenType::Op(Op::BasicOp(OpType::Sub)),
-        Token::Round => TokenType::Op(Op::BasicOp(OpType::Round)),
-        Token::Floor => TokenType::Op(Op::BasicOp(OpType::Floor)),
-        Token::Ceil => TokenType::Op(Op::BasicOp(OpType::Ceil)),
-        Token::Dup => TokenType::Op(Op::BasicOp(OpType::Dup)),
-        Token::Pop => TokenType::Op(Op::BasicOp(OpType::Pop)),
+        Token::Eq => TokenType::Op(Op::Diadic(DiadicOp::Eq)),
+        Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
+        Token::Add => TokenType::Op(Op::Diadic(DiadicOp::Add)),
+        Token::Mul => TokenType::Op(Op::Diadic(DiadicOp::Mul)),
+        Token::Div => TokenType::Op(Op::Diadic(DiadicOp::Div)),
+        Token::Sin => TokenType::Op(Op::Monadic(MonadicOp::Sin)),
+        Token::Max => TokenType::Op(Op::Diadic(DiadicOp::Max)),
+        Token::Sub => TokenType::Op(Op::Diadic(DiadicOp::Sub)),
+        Token::Round => TokenType::Op(Op::Monadic(MonadicOp::Round)),
+        Token::Floor => TokenType::Op(Op::Monadic(MonadicOp::Floor)),
+        Token::Ceil => TokenType::Op(Op::Monadic(MonadicOp::Ceil)),
+        Token::Dup => TokenType::Op(Op::Stack(StackOp::Dup)),
+        Token::Pop => TokenType::Op(Op::Stack(StackOp::Pop)),
         Token::Table => TokenType::Modifier(Modifier::Table),
         Token::Back => TokenType::Modifier(Modifier::Back),
         Token::Gap => TokenType::Modifier(Modifier::Gap),
@@ -482,7 +536,7 @@ fn parse(token: Token) -> Option<TokenType> {
     })
 }
 
-fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<CodeBlock>, Range<usize>> {
+fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, Range<usize>> {
     let mut parsed_code = Vec::new();
     for line in code.lines() {
         let blocks = parse_code_blocks(Token::lexer(line).spanned(), left_to_right)?;
@@ -495,7 +549,7 @@ fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<CodeBlock>, Range<u
 fn parse_code_blocks(
     mut lexer: logos::SpannedIter<Token>,
     left_to_right: bool,
-) -> Result<Vec<CodeBlock>, Range<usize>> {
+) -> Result<Vec<FunctionOrOp>, Range<usize>> {
     let mut blocks = Vec::new();
 
     while let Some(block) = parse_code_block(&mut lexer)? {
@@ -511,238 +565,322 @@ fn parse_code_blocks(
 
 fn parse_code_block(
     lexer: &mut logos::SpannedIter<Token>,
-) -> Result<Option<CodeBlock>, Range<usize>> {
-    let mut modifiers = Vec::new();
-    let mut span_start = None;
+) -> Result<Option<FunctionOrOp>, Range<usize>> {
+    let (token, span) = match lexer.next() {
+        Some((Ok(token), span)) => (token, span),
+        Some((Err(()), span)) => return Err(span),
+        None => return Ok(None),
+    };
 
-    for (token, span) in lexer {
-        let token = match token {
-            Ok(token) => token,
-            Err(()) => return Err(span),
-        };
-
-        span_start = Some(span_start.unwrap_or(span.start));
-
-        match parse(token) {
-            None => {}
-            Some(TokenType::Modifier(modifier)) => modifiers.push(modifier),
-            Some(TokenType::Op(op)) => {
-                return Ok(Some(CodeBlock {
-                    modifiers,
-                    span: span_start.unwrap_or(span.start)..span.end,
-                    code: FunctionOrOp::Op(op),
-                }));
-            }
+    match parse(token) {
+        Some(TokenType::Op(op)) => return Ok(Some(FunctionOrOp::Op(op))),
+        Some(TokenType::Modifier(modifier)) => {
+            return Ok(Some(FunctionOrOp::Function {
+                modifier,
+                code: vec![match parse_code_block(lexer) {
+                    Ok(None) => return Err(span),
+                    Ok(Some(op)) => op,
+                    Err(span) => return Err(span),
+                }],
+            }));
         }
-    }
-
-    Ok(None)
-}
-
-#[derive(Clone, Debug)]
-enum StackItem {
-    Buffer(u32),
-    Other { str: String, is_output: bool },
-}
-
-impl StackItem {
-    fn size(&self) -> String {
-        match &self {
-            Self::Buffer(id) => format!("buffers[{}].size", id),
-            Self::Other { .. } => "Coord(1, 1, 1, 1)".to_string(),
-        }
-    }
-
-    fn is_output(&self) -> bool {
-        match &self {
-            Self::Buffer(_) => false,
-            Self::Other { is_output, .. } => *is_output,
-        }
-    }
-
-    fn str(&self, coord: &str) -> String {
-        match &self {
-            Self::Buffer(id) => format!("read_buffer({}, {})", id, coord),
-            Self::Other { str, .. } => str.to_string(),
-        }
+        None => return Err(span),
     }
 }
 
-#[derive(Debug)]
-enum ModifierAccess {
-    Normal,
-    Transpose,
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+enum NodeOp {
+    Monadic(MonadicOp),
+    Diadic { is_table: bool, op: DiadicOp },
+    Range,
+    Rev,
+    Value(ordered_float::OrderedFloat<f32>),
 }
 
-#[derive(Default, Debug)]
-struct Parser {
-    output_size: String,
-    functions: Vec<Vec<String>>,
-    stack: Vec<StackItem>,
-    modifier_expecting_op: Option<ModifierAccess>,
-    upcoming_admin_commands: Vec<String>,
-    delayed_pops: Vec<usize>,
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct Node {
+    op: NodeOp,
+    size: Size,
 }
 
-impl Parser {
-    fn pop(&mut self) -> Result<StackItem, ()> {
-        if self.delayed_pops.len() >= self.stack.len() {
-            return Err(());
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+enum Size {
+    Scalar,
+    RangeOf(daggy::NodeIndex),
+    MaxOf(daggy::NodeIndex, daggy::NodeIndex),
+    TransposeSizeOf(daggy::NodeIndex, daggy::NodeIndex),
+}
+
+struct Dag {
+    inner: daggy::Dag<Node, ()>,
+    stack: Vec<daggy::NodeIndex>,
+}
+
+fn handle_op(
+    op: FunctionOrOp,
+    mut dag: &mut Dag,
+    map: &mut HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
+    is_table: bool,
+) {
+    let mut insert_node = |dag: &mut Dag, parent_indices: Vec<daggy::NodeIndex>, node: Node| {
+        let index = *map
+            .entry((node.clone(), parent_indices.clone()))
+            .or_insert_with(|| dag.inner.add_node(node));
+        for parent_index in parent_indices {
+            dag.inner.update_edge(parent_index, index, ());
         }
-        self.stack.pop().ok_or(())
-    }
+        dag.stack.push(index);
+    };
 
-    fn peek(&self, depth: usize) -> &StackItem {
-        self.stack.get(self.stack.len() - 1 - depth).unwrap()
-    }
+    match op {
+        FunctionOrOp::Function { modifier, code } => {
+            let mut dipped = None;
+            let mut is_table = false;
 
-    fn modifier_expecting_op(&mut self) -> Option<ModifierAccess> {
-        self.modifier_expecting_op.take()
-    }
-
-    fn finish_write(&mut self) -> Result<(), ()> {
-        let mut admin_commands = std::mem::take(&mut self.upcoming_admin_commands);
-        let mut write_commands = Vec::new();
-        let mut command_to_buffer_index = HashMap::new();
-
-        let mut temporary_buffer_index = 50;
-
-        for (stack_pos, item) in self.stack.iter_mut().enumerate() {
-            if !item.is_output() {
-                continue;
-            }
-
-            if let Some(index) = command_to_buffer_index.get(&item.str("thread_id")) {
-                self.upcoming_admin_commands
-                    .push(format!("buffers[{}] = buffers[{}]", stack_pos, index));
-            } else {
-                command_to_buffer_index.insert(item.str("thread_id"), temporary_buffer_index);
-
-                admin_commands.push(format!(
-                    "allocate({}, {})",
-                    temporary_buffer_index, self.output_size
-                ));
-                write_commands.push(format!(
-                    "thread_id = index_to_coord(thread.x, buffers[{}].size)",
-                    temporary_buffer_index
-                ));
-                write_commands.push(format!(
-                    "write_to_buffer({}, thread_id, {})",
-                    temporary_buffer_index,
-                    item.str("thread_id")
-                ));
-                self.upcoming_admin_commands.push(format!(
-                    "buffers[{}] = buffers[{}]",
-                    stack_pos, temporary_buffer_index
-                ));
-                temporary_buffer_index += 1;
-            }
-
-            *item = StackItem::Buffer(stack_pos as u32);
-        }
-
-        if !admin_commands.is_empty() {
-            self.functions.push(admin_commands);
-        }
-        if !write_commands.is_empty() {
-            self.functions.push(write_commands);
-        }
-
-        for i in self.delayed_pops.drain(..) {
-            self.stack.swap_remove(i);
-            self.upcoming_admin_commands
-                .push(format!("buffers[{}] = buffers[{}]", i - 1, i));
-        }
-
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<(), ()> {
-        self.finish_write()?;
-        for (i, item) in self.stack.iter().enumerate() {
-            match item {
-                StackItem::Other { str, is_output } => {
-                    assert!(!is_output);
-                    self.upcoming_admin_commands
-                        .push(format!("allocate({}, Coord(1,1,1,1))", i));
-                    self.upcoming_admin_commands
-                        .push(format!("write_to_buffer({}, Coord(0,0,0,0), {})", i, str));
+            match modifier {
+                Modifier::Back => {
+                    let x = dag.stack.pop().unwrap();
+                    let y = dag.stack.pop().unwrap();
+                    dag.stack.push(x);
+                    dag.stack.push(y);
                 }
-                StackItem::Buffer(_) => {}
+                Modifier::Dip => {
+                    dipped = Some(dag.stack.pop().unwrap());
+                }
+                Modifier::Gap => {
+                    dag.stack.pop().unwrap();
+                }
+                Modifier::Table => {
+                    is_table = true;
+                    assert_eq!(code.iter().map(|op| op.stack_delta()).sum::<i32>(), -1);
+                }
+            }
+
+            for op in code {
+                handle_op(op, dag, map, is_table);
+            }
+
+            if let Some(value) = dipped {
+                dag.stack.push(value);
             }
         }
-        if !self.upcoming_admin_commands.is_empty() {
-            self.finish_write()?;
+        FunctionOrOp::Op(Op::Value(value)) => insert_node(
+            &mut dag,
+            vec![],
+            Node {
+                op: NodeOp::Value(value.into()),
+                size: Size::Scalar,
+            },
+        ),
+        FunctionOrOp::Op(Op::Stack(StackOp::Dup)) => {
+            dag.stack.push(dag.stack.last().unwrap().clone());
         }
-        Ok(())
+        FunctionOrOp::Op(Op::Stack(StackOp::Pop)) => {
+            dag.stack.pop();
+        }
+        FunctionOrOp::Op(Op::Range) => {
+            let parent_index = dag.stack.pop().unwrap();
+            insert_node(
+                &mut dag,
+                vec![parent_index],
+                Node {
+                    op: NodeOp::Range,
+                    size: Size::RangeOf(parent_index),
+                },
+            );
+        }
+        FunctionOrOp::Op(Op::Rev) => {
+            let index = dag.stack.pop().unwrap();
+            let size = dag.inner[index].size;
+            insert_node(
+                &mut dag,
+                vec![index],
+                Node {
+                    op: NodeOp::Rev,
+                    size,
+                },
+            );
+        }
+        FunctionOrOp::Op(Op::Monadic(op)) => {
+            let index = dag.stack.pop().unwrap();
+            let size = dag.inner[index].size;
+            insert_node(
+                &mut dag,
+                vec![index],
+                Node {
+                    op: NodeOp::Monadic(op),
+                    size,
+                },
+            );
+        }
+        FunctionOrOp::Op(Op::Diadic(op)) => {
+            let x = dag.stack.pop().unwrap();
+            let y = dag.stack.pop().unwrap();
+            let x_val = &dag.inner[x];
+            let y_val = &dag.inner[y];
+            let node = Node {
+                op: NodeOp::Diadic { is_table, op },
+                size: if is_table {
+                    Size::TransposeSizeOf(x, y)
+                } else {
+                    match (x_val.size, y_val.size) {
+                        (Size::Scalar, Size::Scalar) => Size::Scalar,
+                        (Size::RangeOf(x), Size::RangeOf(y)) if x == y => Size::RangeOf(x),
+                        (Size::MaxOf(a, b), Size::MaxOf(c, d))
+                            if (a == c && b == d) || (a == d && b == c) =>
+                        {
+                            Size::MaxOf(a, b)
+                        }
+                        (Size::TransposeSizeOf(a, b), Size::TransposeSizeOf(c, d))
+                            if (a == c && b == d) || (a == d && b == c) =>
+                        {
+                            Size::TransposeSizeOf(a, b)
+                        }
+                        (Size::Scalar, other) | (other, Size::Scalar) => other,
+                        // give up
+                        _ => Size::MaxOf(x, y),
+                    }
+                },
+            };
+            insert_node(&mut dag, vec![x, y], node);
+        }
+    }
+}
+
+fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<daggy::NodeIndex>) {
+    let mut dag = Dag {
+        inner: daggy::Dag::<Node, ()>::new(),
+        stack: Vec::new(),
+    };
+    let mut map = HashMap::new();
+
+    for op in code {
+        handle_op(op, &mut dag, &mut map, false);
     }
 
-    fn handle_monadic<F: Fn(String) -> String>(&mut self, func: F) -> Result<(), ()> {
-        let v = self.pop()?;
-        let modifier_expecting_op = self.modifier_expecting_op();
-        let is_output = v.is_output() || modifier_expecting_op.is_some();
-        let access = match modifier_expecting_op {
-            Some(ModifierAccess::Normal) | None => "thread_id",
-            Some(ModifierAccess::Transpose) => {
-                "Coord(thread_id[1], thread_id[0], thread_id[2], thread_id[3])"
-            }
-        };
-        self.stack.push(StackItem::Other {
-            str: func(v.str(access)),
-            is_output,
-        });
-        Ok(())
-    }
+    (dag.inner, dag.stack)
+}
 
-    fn handle_diadic<F: Fn(String, String) -> String>(
-        &mut self,
-        back: bool,
-        func: F,
-    ) -> Result<(), ()> {
-        let mut a = self.pop()?;
-        let mut b = self.pop()?;
-        if back {
-            std::mem::swap(&mut a, &mut b);
-        }
-        let modifier_expecting_op = self.modifier_expecting_op();
-        let is_output = a.is_output() || b.is_output() || modifier_expecting_op.is_some();
-        let first_access = match modifier_expecting_op {
-            Some(ModifierAccess::Normal) | None => "thread_id",
-            Some(ModifierAccess::Transpose) => {
-                "Coord(thread_id[1], thread_id[0], thread_id[2], thread_id[3])"
-            }
-        };
-        self.stack.push(StackItem::Other {
-            str: func(b.str(first_access), a.str("thread_id")),
-            is_output,
-        });
-        Ok(())
-    }
+use daggy::Walker;
 
-    fn handle_operation(&mut self, back: bool, operation: OpType) -> Result<(), ()> {
-        match operation {
-            OpType::Dup => {
-                let top = self.stack.last().ok_or(())?.clone();
-                self.stack.push(top);
-                Ok(())
-            }
-            OpType::Pop => {
-                self.pop()?;
-                Ok(())
-            }
-            OpType::Add => self.handle_diadic(back, |a, b| format!("({} + {})", a, b)),
-            OpType::Eq => self.handle_diadic(back, |a, b| format!("f32({} == {})", a, b)),
-            OpType::Div => self.handle_diadic(back, |a, b| format!("({} / {})", a, b)),
-            OpType::Mul => self.handle_diadic(back, |a, b| format!("({} * {})", a, b)),
-            OpType::Sub => self.handle_diadic(back, |a, b| format!("({} - {})", a, b)),
-            OpType::Max => self.handle_diadic(back, |a, b| format!("max({}, {})", a, b)),
-            OpType::Sin => self.handle_monadic(|v| format!("sin({})", v)),
-            OpType::Abs => self.handle_monadic(|v| format!("abs({})", v)),
-            OpType::Round => self.handle_monadic(|v| format!("round({})", v)),
-            OpType::Floor => self.handle_monadic(|v| format!("floor({})", v)),
-            OpType::Ceil => self.handle_monadic(|v| format!("ceil({})", v)),
+fn evaluate_scalar(
+    dag: &daggy::Dag<Node, ()>,
+    functions: &mut HashSet<String>,
+    full_eval_to: &HashMap<daggy::NodeIndex, usize>,
+    top_level_eval: bool,
+    index: NodeIndex,
+) -> String {
+    if !top_level_eval {
+        if let Some(buffer_index) = full_eval_to.get(&index) {
+            return if dag[index].size == Size::Scalar {
+                format!("read_buffer({}, Coord(0,0,0,0))", buffer_index)
+            } else {
+                format!("read_buffer({}, thread_coord)", buffer_index)
+            };
         }
     }
+
+    match &dag[index].op {
+        NodeOp::Monadic(op) => format!(
+            "{}({})",
+            format!("{:?}", op).to_lowercase(),
+            evaluate_scalar(
+                dag,
+                functions,
+                full_eval_to,
+                false,
+                dag.parents(index).walk_next(dag).unwrap().1
+            )
+        ),
+        NodeOp::Diadic { op, is_table } => {
+            let mut parents = dag.parents(index);
+            let mut arg_0 = evaluate_scalar(
+                dag,
+                functions,
+                full_eval_to,
+                false,
+                parents.walk_next(dag).unwrap().1,
+            );
+            let arg_1 = parents
+                .walk_next(dag)
+                .map(|parent| evaluate_scalar(dag, functions, full_eval_to, false, parent.1))
+                .unwrap_or_else(|| arg_0.clone());
+
+            if *is_table {
+                functions.insert(format!(
+                    "fn eval_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
+                    index.index(),
+                    arg_0
+                ));
+                arg_0 = format!(
+                    "eval_{}(coord_transpose(thread_coord), dispatch_size)",
+                    index.index()
+                );
+            }
+
+            format!(
+                "{}({}, {})",
+                format!("{:?}", op).to_lowercase(),
+                arg_0,
+                arg_1
+            )
+        }
+        NodeOp::Value(value) => format!("f32({})", value),
+        NodeOp::Range => format!("f32(thread_coord[0])"),
+        NodeOp::Rev => {
+            let function = format!(
+                "fn eval_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
+                index.index(),
+                evaluate_scalar(
+                    dag,
+                    functions,
+                    full_eval_to,
+                    false,
+                    dag.parents(index).walk_next(dag).unwrap().1
+                )
+            );
+            functions.insert(function);
+            format!(
+                "eval_{}(coord_reverse(thread_coord, dispatch_size), dispatch_size)",
+                index.index(),
+            )
+        }
+    }
+}
+
+fn evaluate_size(
+    dag: &daggy::Dag<Node, ()>,
+    functions: &mut HashSet<String>,
+    full_eval_to: &HashMap<daggy::NodeIndex, usize>,
+    index: NodeIndex,
+) -> String {
+    match &dag[index].size {
+        Size::RangeOf(range) => {
+            format!(
+                "Coord(u32({}), 1, 1, 1)",
+                evaluate_scalar(&dag, functions, full_eval_to, false, *range)
+            )
+        }
+        Size::Scalar => format!("Coord(1,1,1,1)"),
+        Size::TransposeSizeOf(a, b) => format!(
+            "coord_max(Coord({0}[1], {0}[0], {0}[2], {0}[3]), {1})",
+            evaluate_size(dag, functions, full_eval_to, *a),
+            evaluate_size(dag, functions, full_eval_to, *b)
+        ),
+        _ => panic!(),
+    }
+}
+
+struct FunctionPair {
+    admin_lines: Vec<String>,
+    work_lines: Vec<String>,
+}
+
+struct CodeBuilder {
+    aux_functions: HashSet<String>,
+    functions: Vec<FunctionPair>,
+    next_dispatch_index: usize,
+    size_to_function_index: HashMap<Size, usize>,
 }
 
 fn main() {
@@ -848,4 +986,17 @@ fn scalar_values() {
         "16.6 3",
         vec![ReadBackValue::scalar(3.0), ReadBackValue::scalar(16.6)],
     );
+}
+
+#[test]
+fn function_delta() {
+    assert_eq!(
+        FunctionOrOp::Function {
+            modifier: Modifier::Table,
+            code: vec![FunctionOrOp::Op(Op::Diadic(DiadicOp::Eq))]
+        }
+        .stack_delta(),
+        -1
+    );
+    assert_eq!(FunctionOrOp::Op(Op::Diadic(DiadicOp::Eq)).stack_delta(), -1)
 }

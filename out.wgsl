@@ -58,6 +58,24 @@ fn coord_prod(coord: Coord) -> u32 {
          * coord[3];
 }
 
+fn coord_reverse(coord: Coord, size: Coord) -> Coord {
+    return Coord(
+        size[0] - 1 - coord[0],
+        coord[1],
+        coord[2],
+        coord[3]
+    );
+}
+
+fn coord_transpose(coord: Coord) -> Coord {
+    return Coord(
+        coord[1],
+        coord[0],
+        coord[2],
+        coord[3]
+    );
+}
+
 fn write_to_buffer(buffer_index: u32, coord: Coord, value: f32) {
     let buffer = buffers[buffer_index];
     if (coord_any_ge(coord, buffer.size)) {
@@ -83,5 +101,21 @@ fn allocate(location: u32, size: Coord) {
     buffers[location].offset = current_offset;
     let length = coord_prod(size);
     current_offset += length;
+}
+
+fn dispatch_for_buffer(buffer_index: u32) {
+    let length = coord_prod(buffers[buffer_index].size);
     dispatches[0] = vec3(div_ceil(length, 64), 1, 1);
+}
+
+fn add(x: f32, y: f32) -> f32 {
+    return x + y;
+}
+
+fn eq(x: f32, y: f32) -> f32 {
+    return f32(x == y);
+}
+
+fn div(x: f32, y: f32) -> f32 {
+    return x / y;
 }
