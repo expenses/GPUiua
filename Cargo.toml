@@ -9,6 +9,7 @@ console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 daggy = "0.9.0"
 env_logger = "0.11.8"
+getrandom = { version = "0.3.3", features = ["wasm_js"] }
 leptos = { version = "0.8.2", features = ["csr"] }
 log = "0.4.27"
 logos = "0.15.0"
