@@ -435,6 +435,7 @@ impl FunctionOrOp {
                     Modifier::Dip => 0,
                     Modifier::Table => 0,
                     Modifier::Gap => -1,
+                    Modifier::By => 1,
                 };
 
                 modifier + code.iter().map(|op| op.stack_delta()).sum::<i32>()
@@ -459,6 +460,7 @@ enum Modifier {
     Back,
     Gap,
     Dip,
+    By,
 }
 
 enum TokenType {
@@ -509,8 +511,8 @@ enum Token {
     Ceil,
     #[regex(r"ident|∘")]
     Ident,
-    #[regex("#[^\n]*")]
-    Comment,
+    #[regex(r"by|⊸")]
+    By,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -538,18 +540,24 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Back => TokenType::Modifier(Modifier::Back),
         Token::Gap => TokenType::Modifier(Modifier::Gap),
         Token::Dip => TokenType::Modifier(Modifier::Dip),
+        Token::By => TokenType::Modifier(Modifier::By),
         Token::Range => TokenType::Op(Op::Range),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
-        Token::Comment | Token::OpenParen | Token::CloseParen => return None,
+        Token::OpenParen | Token::CloseParen => return None,
     })
 }
 
-fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, Range<usize>> {
+fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, (&str, Range<usize>)> {
     let mut parsed_code = Vec::new();
     for line in code.lines() {
-        let blocks = parse_code_blocks(Token::lexer(line).spanned().peekable(), left_to_right)?;
+        let line = line
+            .split_once('#')
+            .map(|(before_comment, _)| before_comment)
+            .unwrap_or(line);
+        let blocks = parse_code_blocks(Token::lexer(line).spanned().peekable(), left_to_right)
+            .map_err(|span| (line, span))?;
         parsed_code.extend_from_slice(&blocks);
     }
 
@@ -676,6 +684,9 @@ fn handle_op(
                 }
                 Modifier::Dip => {
                     dipped = Some(dag.stack.pop().unwrap());
+                }
+                Modifier::By => {
+                    dag.stack.push(dag.stack.last().unwrap().clone());
                 }
                 Modifier::Gap => {
                     dag.stack.pop().unwrap();
@@ -1008,7 +1019,12 @@ fn assert_output(string: &str, output: Vec<ReadBackValue>) {
 #[test]
 fn identity_matrix_cross() {
     assert_output(
-        "max rev dup table = dup range 5",
+        "
+        ⇡5  # 0 through 4
+        ⊞=. # Identity matrix
+        ⊸⇌  # Reverse
+        ↥   # Max
+        ",
         vec![ReadBackValue {
             size: [5, 5, 1, 1],
             #[rustfmt::skip]
