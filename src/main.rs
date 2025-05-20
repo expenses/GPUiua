@@ -8,8 +8,9 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     let mut code_builder = CodeBuilder {
         functions: vec![FunctionPair {
-            admin_lines: Vec::new(),
-            work_lines: Vec::new(),
+            admin_lines: vec![format!("atomicStore(&data.random_state, u32(1))")],
+            work_lines: Default::default(),
+            dispatching_on_buffer_index: None,
         }],
         aux_functions: Default::default(),
         next_dispatch_index: 0,
@@ -55,18 +56,12 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                             code_builder.functions[dispatch_index]
                                 .admin_lines
                                 .push(format!("dispatch_for_buffer({})", i));
-                            code_builder.functions[dispatch_index]
-                                .work_lines
-                                .push(format!("let dispatch_size = buffers[{}].size", i));
-                            code_builder.functions[dispatch_index]
-                                .work_lines
-                                .push(format!(
-                                    "let thread_coord = index_to_coord(thread.x, dispatch_size)"
-                                ));
 
                             code_builder.functions.push(Default::default());
                             dispatch_index
                         });
+
+                    code_builder.functions[dispatch_index].dispatching_on_buffer_index = Some(i);
 
                     code_builder.functions[dispatch_index]
                         .work_lines
@@ -90,7 +85,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     for function in code_builder.aux_functions {
         shader.push_str(&function);
-        shader.push_str("\n");
+        shader.push('\n');
     }
 
     let mut step_index = 0;
@@ -109,8 +104,12 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         }
         shader.push_str("}\n");
         step_index += 1;
+        let i = pair.dispatching_on_buffer_index.unwrap();
         shader.push_str(&format!("@compute @workgroup_size(64,1,1) fn step_{}(@builtin(global_invocation_id) thread: vec3<u32>) {{\n", step_index));
-        for line in &pair.work_lines {
+        shader.push_str(&format!("let dispatch_size = buffers[{}].size;\n", i));
+        shader.push_str("let thread_coord = index_to_coord(thread.x, dispatch_size);\n");
+
+        for line in pair.work_lines.iter().rev() {
             shader.push_str(&format!("{};\n", line));
         }
         shader.push_str("}\n");
@@ -217,7 +216,7 @@ impl Context {
         });
         let temp_data = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("temp_data"),
-            size: 4,
+            size: 4 * 2,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -367,7 +366,7 @@ impl Context {
                     for chunk in value.values.chunks(x as usize) {
                         output.push_str(&format!("{:?}\n", chunk));
                     }
-                    output.push_str("\n");
+                    output.push('\n');
                 }
                 _ => panic!(),
             }
@@ -421,11 +420,13 @@ enum FunctionOrOp {
 }
 
 impl FunctionOrOp {
+    #[allow(unused)]
     fn stack_delta(&self) -> i32 {
         match self {
             Self::Op(Op::Monadic(_)) => 0,
             Self::Op(Op::Dyadic(_)) => -1,
             Self::Op(Op::Value(_)) => 1,
+            Self::Op(Op::Rand) => 1,
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
@@ -454,6 +455,7 @@ enum Op {
     Value(f32),
     Range,
     Rev,
+    Rand,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -480,6 +482,8 @@ enum Token<'source> {
     Add,
     #[regex(r"mul|\*")]
     Mul,
+    #[regex(r"rand")]
+    Rand,
     #[regex(r"div|÷")]
     Div,
     #[regex(r"eq|=")]
@@ -528,6 +532,7 @@ enum Token<'source> {
 
 fn parse(token: Token) -> Option<TokenType> {
     Some(match token {
+        Token::Rand => TokenType::Op(Op::Rand),
         Token::Eq => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
         Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
         Token::Add => TokenType::Op(Op::Dyadic(DyadicOp::Add)),
@@ -627,10 +632,8 @@ fn parse_code_blocks_inner<'a>(
     };
 
     match parse(token) {
-        Some(TokenType::AssignedOp(name)) => {
-            return Ok(assignments.get(name).unwrap().clone());
-        }
-        Some(TokenType::Op(op)) => return Ok(vec![FunctionOrOp::Op(op)]),
+        Some(TokenType::AssignedOp(name)) => Ok(assignments.get(name).unwrap().clone()),
+        Some(TokenType::Op(op)) => Ok(vec![FunctionOrOp::Op(op)]),
         Some(TokenType::Modifier(modifier)) => {
             if let Some(&(Ok(Token::OpenParen), _)) = lexer.peek() {
                 let _ = lexer.next();
@@ -655,17 +658,17 @@ fn parse_code_blocks_inner<'a>(
                     })
                 }
             } else {
-                return Ok(vec![FunctionOrOp::Function {
+                Ok(vec![FunctionOrOp::Function {
                     modifier,
                     code: match parse_code_blocks_inner(lexer, left_to_right, assignments) {
                         Ok(ops) if ops.is_empty() => return Err(span),
                         Ok(ops) => ops,
                         Err(span) => return Err(span),
                     },
-                }]);
+                }])
             }
         }
-        None => return Err(span),
+        None => Err(span),
     }
 }
 
@@ -675,6 +678,7 @@ enum NodeOp {
     Dyadic { is_table: bool, op: DyadicOp },
     Range,
     Rev,
+    Rand,
     Value(ordered_float::OrderedFloat<f32>),
 }
 
@@ -699,14 +703,17 @@ struct Dag {
 
 fn handle_op(
     op: FunctionOrOp,
-    mut dag: &mut Dag,
+    dag: &mut Dag,
     map: &mut HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
     mut table_of_size: Option<Size>,
 ) {
     let mut insert_node = |dag: &mut Dag, parent_indices: Vec<daggy::NodeIndex>, node: Node| {
-        let index = *map
-            .entry((node.clone(), parent_indices.clone()))
-            .or_insert_with(|| dag.inner.add_node(node));
+        let index = if node.op == NodeOp::Rand {
+            dag.inner.add_node(node)
+        } else {
+            *map.entry((node.clone(), parent_indices.clone()))
+                .or_insert_with(|| dag.inner.add_node(node))
+        };
         for parent_index in parent_indices {
             dag.inner.update_edge(parent_index, index, ()).unwrap();
         }
@@ -728,13 +735,13 @@ fn handle_op(
                     dipped = Some(dag.stack.pop().unwrap());
                 }
                 Modifier::By => {
-                    dag.stack.push(dag.stack.last().unwrap().clone());
+                    dag.stack.push(*dag.stack.last().unwrap());
                 }
                 Modifier::Gap => {
                     dag.stack.pop().unwrap();
                 }
                 Modifier::Table => {
-                    let x = dag.stack.get(dag.stack.len() - 1).unwrap();
+                    let x = dag.stack.last().unwrap();
                     let y = dag.stack.get(dag.stack.len() - 2).unwrap();
                     table_of_size = Some(Size::TransposeSizeOf(*x, *y));
                 }
@@ -748,8 +755,16 @@ fn handle_op(
                 dag.stack.push(value);
             }
         }
+        FunctionOrOp::Op(Op::Rand) => insert_node(
+            dag,
+            vec![],
+            Node {
+                op: NodeOp::Rand,
+                size: table_of_size.unwrap_or(Size::Scalar),
+            },
+        ),
         FunctionOrOp::Op(Op::Value(value)) => insert_node(
-            &mut dag,
+            dag,
             vec![],
             Node {
                 op: NodeOp::Value(value.into()),
@@ -757,7 +772,7 @@ fn handle_op(
             },
         ),
         FunctionOrOp::Op(Op::Stack(StackOp::Dup)) => {
-            dag.stack.push(dag.stack.last().unwrap().clone());
+            dag.stack.push(*dag.stack.last().unwrap());
         }
         FunctionOrOp::Op(Op::Stack(StackOp::Pop)) => {
             dag.stack.pop();
@@ -767,12 +782,12 @@ fn handle_op(
             let index = dag.stack.pop().unwrap();
             let mut node = dag.inner[index].clone();
             node.size = table_of_size.unwrap_or(node.size);
-            insert_node(&mut dag, vec![index], node);
+            insert_node(dag, vec![index], node);
         }
         FunctionOrOp::Op(Op::Range) => {
             let parent_index = dag.stack.pop().unwrap();
             insert_node(
-                &mut dag,
+                dag,
                 vec![parent_index],
                 Node {
                     op: NodeOp::Range,
@@ -784,7 +799,7 @@ fn handle_op(
             let index = dag.stack.pop().unwrap();
             let size = dag.inner[index].size;
             insert_node(
-                &mut dag,
+                dag,
                 vec![index],
                 Node {
                     op: NodeOp::Rev,
@@ -796,7 +811,7 @@ fn handle_op(
             let index = dag.stack.pop().unwrap();
             let size = dag.inner[index].size;
             insert_node(
-                &mut dag,
+                dag,
                 vec![index],
                 Node {
                     op: NodeOp::Monadic(op),
@@ -836,7 +851,7 @@ fn handle_op(
                     }
                 },
             };
-            insert_node(&mut dag, vec![x, y], node);
+            insert_node(dag, vec![x, y], node);
         }
     }
 }
@@ -920,7 +935,8 @@ fn evaluate_scalar(
             )
         }
         NodeOp::Value(value) => format!("f32({})", value),
-        NodeOp::Range => format!("f32(thread_coord[0])"),
+        NodeOp::Range => "f32(thread_coord[0])".to_string(),
+        NodeOp::Rand => "rand()".to_string(),
         NodeOp::Rev => {
             let function = format!(
                 "fn eval_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
@@ -952,10 +968,10 @@ fn evaluate_size(
         Size::RangeOf(range) => {
             format!(
                 "Coord(u32({}), 1, 1, 1)",
-                evaluate_scalar(&dag, functions, full_eval_to, false, *range)
+                evaluate_scalar(dag, functions, full_eval_to, false, *range)
             )
         }
-        Size::Scalar => format!("Coord(1,1,1,1)"),
+        Size::Scalar => "Coord(1,1,1,1)".to_string(),
         Size::TransposeSizeOf(a, b) => format!(
             "coord_max(coord_transpose({}), {})",
             evaluate_size(dag, functions, full_eval_to, *a),
@@ -965,10 +981,11 @@ fn evaluate_size(
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct FunctionPair {
     admin_lines: Vec<String>,
     work_lines: Vec<String>,
+    dispatching_on_buffer_index: Option<usize>,
 }
 
 struct CodeBuilder {

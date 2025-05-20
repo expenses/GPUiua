@@ -1,7 +1,17 @@
+struct Data {
+    current_offset: u32,
+    random_state: atomic<u32>
+};
+
 @group(0) @binding(0) var<storage, read_write> buffers: array<Buffer>;
-@group(0) @binding(1) var<storage, read_write> current_offset: u32;
+@group(0) @binding(1) var<storage, read_write> data: Data;
 @group(0) @binding(2) var<storage, read_write> values: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dispatches: array<vec3<u32>>;
+
+fn rand() -> f32 {
+    let state = atomicAdd(&data.random_state, u32(1));
+    return f32(state) / 10.0;
+}
 
 alias Coord = array<u32, 4>;
 
@@ -98,9 +108,9 @@ fn div_ceil(value: u32, divisor: u32) -> u32 {
 
 fn allocate(location: u32, size: Coord) {
     buffers[location].size = size;
-    buffers[location].offset = current_offset;
+    buffers[location].offset = data.current_offset;
     let length = coord_prod(size);
-    current_offset += length;
+    data.current_offset += length;
 }
 
 fn dispatch_for_buffer(buffer_index: u32) {
@@ -122,4 +132,8 @@ fn div(x: f32, y: f32) -> f32 {
 
 fn mul(x: f32, y: f32) -> f32 {
     return x * y;
+}
+
+fn sub(x: f32, y: f32) -> f32 {
+    return x - y;
 }
