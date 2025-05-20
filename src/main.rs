@@ -507,10 +507,12 @@ enum Token {
     Ceil,
     #[regex("#[^\n]*")]
     Comment,
-    #[token("\n")]
-    LineBreak,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
+    #[token("(")]
+    OpenParen,
+    #[token(")")]
+    CloseParen,
 }
 
 fn parse(token: Token) -> Option<TokenType> {
@@ -535,14 +537,14 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Range => TokenType::Op(Op::Range),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
-        Token::Comment | Token::LineBreak => return None,
+        Token::Comment | Token::OpenParen | Token::CloseParen => return None,
     })
 }
 
 fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, Range<usize>> {
     let mut parsed_code = Vec::new();
     for line in code.lines() {
-        let blocks = parse_code_blocks(Token::lexer(line).spanned(), left_to_right)?;
+        let blocks = parse_code_blocks(Token::lexer(line).spanned().peekable(), left_to_right)?;
         parsed_code.extend_from_slice(&blocks);
     }
 
@@ -550,12 +552,12 @@ fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, Rang
 }
 
 fn parse_code_blocks(
-    mut lexer: logos::SpannedIter<Token>,
+    mut lexer: std::iter::Peekable<logos::SpannedIter<Token>>,
     left_to_right: bool,
 ) -> Result<Vec<FunctionOrOp>, Range<usize>> {
     let mut blocks = Vec::new();
 
-    while let Some(block) = parse_code_block(&mut lexer)? {
+    while let Some(block) = parse_code_block(&mut lexer, left_to_right)? {
         blocks.push(block);
     }
 
@@ -567,7 +569,8 @@ fn parse_code_blocks(
 }
 
 fn parse_code_block(
-    lexer: &mut logos::SpannedIter<Token>,
+    lexer: &mut std::iter::Peekable<logos::SpannedIter<Token>>,
+    left_to_right: bool,
 ) -> Result<Option<FunctionOrOp>, Range<usize>> {
     let (token, span) = match lexer.next() {
         Some((Ok(token), span)) => (token, span),
@@ -578,14 +581,34 @@ fn parse_code_block(
     match parse(token) {
         Some(TokenType::Op(op)) => return Ok(Some(FunctionOrOp::Op(op))),
         Some(TokenType::Modifier(modifier)) => {
-            return Ok(Some(FunctionOrOp::Function {
-                modifier,
-                code: vec![match parse_code_block(lexer) {
-                    Ok(None) => return Err(span),
-                    Ok(Some(op)) => op,
-                    Err(span) => return Err(span),
-                }],
-            }));
+            if let Some(&(Ok(Token::OpenParen), _)) = lexer.peek() {
+                let _ = lexer.next();
+                let mut code = Vec::new();
+                loop {
+                    if let Some(&(Ok(Token::CloseParen), _)) = lexer.peek() {
+                        let _ = lexer.next();
+                        if !left_to_right {
+                            code.reverse();
+                        }
+                        return Ok(Some(FunctionOrOp::Function { modifier, code }));
+                    }
+
+                    code.push(match parse_code_block(lexer, left_to_right) {
+                        Ok(None) => return Err(span),
+                        Ok(Some(op)) => op,
+                        Err(span) => return Err(span),
+                    })
+                }
+            } else {
+                return Ok(Some(FunctionOrOp::Function {
+                    modifier,
+                    code: vec![match parse_code_block(lexer, left_to_right) {
+                        Ok(None) => return Err(span),
+                        Ok(Some(op)) => op,
+                        Err(span) => return Err(span),
+                    }],
+                }));
+            }
         }
         None => return Err(span),
     }
@@ -1022,6 +1045,17 @@ fn identical_range_after_table() {
 fn table_double_gap() {
     assert_output(
         "table gap gap 5 . range 2",
+        vec![ReadBackValue {
+            size: [2, 2, 1, 1],
+            values: vec![5.0, 5.0, 5.0, 5.0],
+        }],
+    );
+}
+
+#[test]
+fn table_pop_in_parens() {
+    assert_output(
+        "table (5 pop pop) . range 2",
         vec![ReadBackValue {
             size: [2, 2, 1, 1],
             values: vec![5.0, 5.0, 5.0, 5.0],
