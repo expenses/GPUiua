@@ -1,6 +1,5 @@
 struct Data {
     current_offset: u32,
-    random_state: atomic<u32>
 };
 
 @group(0) @binding(0) var<storage, read_write> buffers: array<Buffer>;
@@ -8,9 +7,37 @@ struct Data {
 @group(0) @binding(2) var<storage, read_write> values: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dispatches: array<vec3<u32>>;
 
-fn rand() -> f32 {
-    let state = atomicAdd(&data.random_state, u32(1));
-    return f32(state) / 10.0;
+// Random functions from https://marktension.nl/blog/my_favorite_wgsl_random_func_so_far/
+// Not perfect but good enough and I'm lazy.
+
+// A single iteration of Bob Jenkins' One-At-A-Time hashing algorithm for u32.
+fn hash_u32(x_in: u32) -> u32 {
+    var x = x_in;
+    x += (x << 10u);
+    x ^= (x >> 6u);
+    x += (x << 3u);
+    x ^= (x >> 11u);
+    x += (x << 15u);
+    return x;
+}
+
+// Construct a float with half-open range [0:1] using low 23 bits.
+// All zeroes yields 0.0, all ones yields the next smallest representable value below 1.0.
+fn float_construct_from_u32(m_in: u32) -> f32 {
+    let ieeeMantissa = 0x007FFFFFu; // binary32 mantissa bitmask
+    let ieeeOne = 0x3F800000u;      // 1.0 in IEEE binary32
+
+    var m = m_in;
+    m &= ieeeMantissa;              // Keep only mantissa bits (fractional part)
+    m |= ieeeOne;                   // Add fractional part to 1.0
+
+    let f = bitcast<f32>(m);        // Range [1:2]
+    return f - 1.0;                 // Range [0:1]
+}
+
+// Pseudo-random value in half-open range [0:1] from a u32 seed.
+fn random_uniform(seed: u32) -> f32 {
+    return float_construct_from_u32(hash_u32(seed));
 }
 
 alias Coord = array<u32, 4>;

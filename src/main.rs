@@ -1,4 +1,8 @@
+use rand::Rng;
+
 fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
+    let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
+
     let (dag, final_stack) = parse_code_to_dag(code);
     let mut full_eval_to: BTreeMap<daggy::NodeIndex, usize> = final_stack
         .iter()
@@ -8,11 +12,18 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let mut i = 50;
     for index in dag.graph().node_indices() {
         let node = &dag[index];
+        // todo: check if this value is actually reachable
         match node {
             Node {
                 op: NodeOp::Rand,
-                size: Size::TransposeSizeOf(_, _),
+                size: Size::Scalar, //Size::TransposeSizeOf(_, _),
             } => {
+                // doesn't work. would need to walk whole tree and see if output is also scalar.
+                //let all_children_scalar = dag.children(index).iter(&dag).all(|(_, child)| dag[child].size == Size::Scalar);
+                //if all_children_scalar {
+                //    continue;
+                //}
+
                 full_eval_to.insert(index, i);
                 i += 1
             }
@@ -22,7 +33,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     let mut code_builder = CodeBuilder {
         functions: vec![FunctionPair {
-            admin_lines: vec![format!("atomicStore(&data.random_state, u32(1))")],
+            admin_lines: vec![],
             work_lines: Default::default(),
             dispatching_on_buffer_index: None,
         }],
@@ -42,6 +53,9 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
         match &dag[item].size {
             Size::Scalar => {
+                code_builder.functions[0]
+                    .admin_lines
+                    .push(format!("random_seed += 1"));
                 code_builder.functions[0].admin_lines.push(format!(
                     "write_to_buffer({}, Coord(0,0,0,0), {})",
                     i,
@@ -114,18 +128,28 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         }
 
         shader.push_str(&format!(
-            "@compute @workgroup_size(1,1,1) fn step_{}() {{\n",
+            "\n@compute @workgroup_size(1,1,1) fn step_{}() {{\n",
             step_index
+        ));
+        shader.push_str(&format!(
+            "var random_seed = u32({});\n",
+            rng.random::<u32>()
         ));
         for line in &pair.admin_lines {
             shader.push_str(&format!("{};\n", line));
         }
         shader.push_str("}\n");
         step_index += 1;
-        let i = pair.dispatching_on_buffer_index.unwrap();
         shader.push_str(&format!("@compute @workgroup_size(64,1,1) fn step_{}(@builtin(global_invocation_id) thread: vec3<u32>) {{\n", step_index));
-        shader.push_str(&format!("let dispatch_size = buffers[{}].size;\n", i));
-        shader.push_str("let thread_coord = index_to_coord(thread.x, dispatch_size);\n");
+        if let Some(index) = pair.dispatching_on_buffer_index {
+            shader.push_str(&format!("let dispatch_size = buffers[{}].size;\n", index));
+            shader.push_str("let thread_coord = index_to_coord(thread.x, dispatch_size);\n");
+            shader.push_str("if (coord_any_ge(thread_coord, dispatch_size)) {return;}\n");
+            shader.push_str(&format!(
+                "let random_seed = thread.x + {};\n",
+                rng.random::<u32>()
+            ));
+        }
 
         for line in pair.work_lines.iter() {
             shader.push_str(&format!("{};\n", line));
@@ -889,6 +913,7 @@ fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<dagg
 }
 
 use daggy::Walker;
+use rand::SeedableRng;
 
 fn evaluate_scalar(
     dag: &daggy::Dag<Node, ()>,
@@ -954,7 +979,7 @@ fn evaluate_scalar(
         }
         NodeOp::Value(value) => format!("f32({})", value),
         NodeOp::Range => "f32(thread_coord[0])".to_string(),
-        NodeOp::Rand => "rand()".to_string(),
+        NodeOp::Rand => "random_uniform(random_seed)".to_string(),
         NodeOp::Rev => {
             let function = format!(
                 "fn eval_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
@@ -1213,4 +1238,29 @@ fn function_delta() {
         -1
     );
     assert_eq!(FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq)).stack_delta(), -1)
+}
+
+#[test]
+fn deterministic_rng() {
+    assert_output(
+        "rand rand",
+        vec![
+            ReadBackValue::scalar(0.74225104),
+            ReadBackValue::scalar(0.96570766),
+        ],
+    );
+}
+
+#[test]
+fn rng_table() {
+    assert_output(
+        "table gap gap rand . range 3",
+        vec![ReadBackValue {
+            size: [3, 3, 1, 1],
+            values: vec![
+                0.4196651, 0.7859788, 0.84304845, 0.56487226, 0.15387845, 0.9303609, 0.51091456,
+                0.705348, 0.974491,
+            ],
+        }],
+    );
 }
