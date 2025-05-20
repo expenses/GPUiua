@@ -117,8 +117,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         step_index += 1;
     }
 
-    println!("{}", shader);
-
     ShaderModule {
         code: shader,
         num_functions: step_index,
@@ -625,14 +623,14 @@ fn handle_op(
     op: FunctionOrOp,
     mut dag: &mut Dag,
     map: &mut HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
-    is_table: bool,
+    mut table_of_size: Option<Size>,
 ) {
     let mut insert_node = |dag: &mut Dag, parent_indices: Vec<daggy::NodeIndex>, node: Node| {
         let index = *map
             .entry((node.clone(), parent_indices.clone()))
             .or_insert_with(|| dag.inner.add_node(node));
         for parent_index in parent_indices {
-            dag.inner.update_edge(parent_index, index, ());
+            dag.inner.update_edge(parent_index, index, ()).unwrap();
         }
         dag.stack.push(index);
     };
@@ -640,7 +638,6 @@ fn handle_op(
     match op {
         FunctionOrOp::Function { modifier, code } => {
             let mut dipped = None;
-            let mut is_table = false;
 
             match modifier {
                 Modifier::Back => {
@@ -656,13 +653,15 @@ fn handle_op(
                     dag.stack.pop().unwrap();
                 }
                 Modifier::Table => {
-                    is_table = true;
+                    let x = dag.stack.get(dag.stack.len() - 1).unwrap();
+                    let y = dag.stack.get(dag.stack.len() - 2).unwrap();
+                    table_of_size = Some(Size::TransposeSizeOf(*x, *y));
                     assert_eq!(code.iter().map(|op| op.stack_delta()).sum::<i32>(), -1);
                 }
             }
 
             for op in code {
-                handle_op(op, dag, map, is_table);
+                handle_op(op, dag, map, table_of_size);
             }
 
             if let Some(value) = dipped {
@@ -674,7 +673,7 @@ fn handle_op(
             vec![],
             Node {
                 op: NodeOp::Value(value.into()),
-                size: Size::Scalar,
+                size: table_of_size.unwrap_or(Size::Scalar),
             },
         ),
         FunctionOrOp::Op(Op::Stack(StackOp::Dup)) => {
@@ -714,7 +713,7 @@ fn handle_op(
                 vec![index],
                 Node {
                     op: NodeOp::Monadic(op),
-                    size,
+                    size: table_of_size.unwrap_or(size),
                 },
             );
         }
@@ -724,9 +723,12 @@ fn handle_op(
             let x_val = &dag.inner[x];
             let y_val = &dag.inner[y];
             let node = Node {
-                op: NodeOp::Diadic { is_table, op },
-                size: if is_table {
-                    Size::TransposeSizeOf(x, y)
+                op: NodeOp::Diadic {
+                    is_table: table_of_size.is_some(),
+                    op,
+                },
+                size: if let Some(size) = table_of_size {
+                    size
                 } else {
                     match (x_val.size, y_val.size) {
                         (Size::Scalar, Size::Scalar) => Size::Scalar,
@@ -760,7 +762,7 @@ fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<dagg
     let mut map = HashMap::new();
 
     for op in code {
-        handle_op(op, &mut dag, &mut map, false);
+        handle_op(op, &mut dag, &mut map, None);
     }
 
     (dag.inner, dag.stack)
@@ -1013,6 +1015,17 @@ fn identical_range_after_table() {
                 values: vec![0.0, 1.0, 2.0],
             },
         ],
+    );
+}
+
+#[test]
+fn table_double_gap() {
+    assert_output(
+        "table gap gap 5 . range 2",
+        vec![ReadBackValue {
+            size: [2, 2, 1, 1],
+            values: vec![5.0, 5.0, 5.0, 5.0],
+        }],
     );
 }
 
