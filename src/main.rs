@@ -18,7 +18,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     let mut node_to_allocation = HashMap::new();
 
-    for (i, item) in final_stack.iter().enumerate() {
+    for (i, item) in final_stack.iter().enumerate().rev() {
         if let Some(allocation) = node_to_allocation.get(item) {
             code_builder.functions[0]
                 .admin_lines
@@ -63,6 +63,8 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                                 .push(format!(
                                     "let thread_coord = index_to_coord(thread.x, dispatch_size)"
                                 ));
+
+                            code_builder.functions.push(Default::default());
                             dispatch_index
                         });
 
@@ -79,7 +81,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                                 *item
                             )
                         ));
-                    code_builder.next_dispatch_index += 1;
                 }
             }
         }
@@ -95,6 +96,10 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let mut step_index = 0;
 
     for pair in &code_builder.functions {
+        if pair.admin_lines.is_empty() && pair.work_lines.is_empty() {
+            continue;
+        }
+
         shader.push_str(&format!(
             "@compute @workgroup_size(1,1,1) fn step_{}() {{\n",
             step_index
@@ -116,7 +121,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     ShaderModule {
         code: shader,
-        num_functions: code_builder.functions.len() * 2,
+        num_functions: step_index,
         final_stack_len: final_stack.len(),
     }
 }
@@ -871,6 +876,7 @@ fn evaluate_size(
     }
 }
 
+#[derive(Default)]
 struct FunctionPair {
     admin_lines: Vec<String>,
     work_lines: Vec<String>,
@@ -985,6 +991,28 @@ fn scalar_values() {
     assert_output(
         "16.6 3",
         vec![ReadBackValue::scalar(3.0), ReadBackValue::scalar(16.6)],
+    );
+}
+
+#[test]
+fn identical_range_after_table() {
+    assert_output(
+        "range 3 table max . range 3",
+        vec![
+            ReadBackValue {
+                size: [3, 3, 1, 1],
+                #[rustfmt::skip]
+                values: vec![
+                        0.0, 1.0, 2.0,
+                        1.0, 1.0, 2.0,
+                        2.0, 2.0, 2.0
+                ],
+            },
+            ReadBackValue {
+                size: [3, 1, 1, 1],
+                values: vec![0.0, 1.0, 2.0],
+            },
+        ],
     );
 }
 
