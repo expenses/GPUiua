@@ -427,7 +427,7 @@ impl Context {
     ) -> Result<Vec<ReadBackValue>, String> {
         let module = generate_module(
             parse_code(string, left_to_right)
-                .map_err(|(str, span)| format!("'{}' {:?}", str, span))?,
+                .map_err(|(str, span)| format!("'{}' {:?} '{}'", str, span.clone(), &str[span]))?,
         );
         log::debug!("{}", module.code);
         Ok(self.run(&module).await)
@@ -534,6 +534,7 @@ impl FunctionOrOp {
                     Modifier::By => 1,
                     Modifier::Reduce => 1,
                     Modifier::On => 1,
+                    Modifier::Rows => 0,
                 };
 
                 modifier + code.iter().map(|op| op.stack_delta()).sum::<i32>()
@@ -565,6 +566,7 @@ enum Modifier {
     By,
     Reduce,
     On,
+    Rows,
 }
 
 enum TokenType<'a> {
@@ -578,9 +580,11 @@ enum TokenType<'a> {
 enum Token<'source> {
     #[regex(r"[a-zA-Z_]+[a-zA-Z_0-9]*", priority = 0)]
     String(&'source str),
+    #[regex(r"rows|≡")]
+    Rows,
     #[regex(r"add|\+")]
     Add,
-    #[regex(r"mul|\*")]
+    #[regex(r"mul|\*|×")]
     Mul,
     #[regex(r"rand|⚂")]
     Rand,
@@ -691,6 +695,7 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Back => TokenType::Modifier(Modifier::Back),
         Token::Table => TokenType::Modifier(Modifier::Table),
         Token::Reduce => TokenType::Modifier(Modifier::Reduce),
+        Token::Rows => TokenType::Modifier(Modifier::Rows),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
@@ -891,7 +896,7 @@ impl Dag {
     }
 }
 
-fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
+fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
     match op {
         FunctionOrOp::Function { modifier, code } => {
             let mut dipped = None;
@@ -926,7 +931,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
                 Modifier::Table => {
                     let x = dag.stack.last().unwrap();
                     let y = dag.stack.get(dag.stack.len() - 2).unwrap();
-                    table_of_size = Some(Size::TransposeSizeOf(*x, *y));
+                    override_size = Some(Size::TransposeSizeOf(*x, *y));
                 }
                 Modifier::Reduce => {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
@@ -941,12 +946,16 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
                         },
                         vec![],
                     );
-                    table_of_size = Some(reducing_array_size);
+                    override_size = Some(reducing_array_size);
+                }
+                Modifier::Rows => {
+                    let x = *dag.stack.last().unwrap();
+                    override_size = Some(dag.inner[x].size);
                 }
             }
 
             for op in code {
-                handle_op(op, dag, table_of_size);
+                handle_op(op, dag, override_size);
             }
 
             if let Some(reducing) = reducing {
@@ -981,14 +990,14 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
         FunctionOrOp::Op(Op::Rand) => dag.insert_node(
             Node {
                 op: NodeOp::Rand,
-                size: table_of_size.unwrap_or(Size::Scalar),
+                size: override_size.unwrap_or(Size::Scalar),
             },
             vec![],
         ),
         FunctionOrOp::Op(Op::Value(value)) => dag.insert_node(
             Node {
                 op: NodeOp::Value(value.into()),
-                size: table_of_size.unwrap_or(Size::Scalar),
+                size: override_size.unwrap_or(Size::Scalar),
             },
             vec![],
         ),
@@ -1016,7 +1025,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
                 .map(|(_, index)| index)
                 .collect();
             let mut node = dag.inner[index].clone();
-            node.size = table_of_size.unwrap_or(node.size);
+            node.size = override_size.unwrap_or(node.size);
             dag.insert_node(node, parents);
         }
         FunctionOrOp::Op(Op::Len) => {
@@ -1056,7 +1065,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
             dag.insert_node(
                 Node {
                     op: NodeOp::Monadic(op),
-                    size: table_of_size.unwrap_or(size),
+                    size: override_size.unwrap_or(size),
                 },
                 vec![index],
             );
@@ -1068,10 +1077,10 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
             let y_val = &dag.inner[y];
             let node = Node {
                 op: NodeOp::Dyadic {
-                    is_table: matches!(table_of_size, Some(Size::TransposeSizeOf(_, _))),
+                    is_table: matches!(override_size, Some(Size::TransposeSizeOf(_, _))),
                     op,
                 },
-                size: if let Some(size) = table_of_size {
+                size: if let Some(size) = override_size {
                     size
                 } else {
                     match (x_val.size, y_val.size) {
@@ -1597,12 +1606,12 @@ fn rand_average() {
 fn sum_div_len() {
     assert_output(
         "
-            range 4 # [1 5 8 2]
-            ⟜/+ # Sum
-            ⧻   # Length
-            ÷   # Divide
+        [1 5 8 2]
+        ⟜/+ # Sum
+        ⧻   # Length
+        ÷   # Divide
         ",
-        vec![ReadBackValue::scalar(1.5)],
+        vec![ReadBackValue::scalar(4.0)],
     )
 }
 
@@ -1644,4 +1653,230 @@ fn array_creation_mirrors_uiua() {
             ReadBackValue::scalar(5.0),
         ],
     )
+}
+
+#[test]
+fn rows_rand() {
+    assert_output(
+        "rows gap rand range 5",
+        vec![ReadBackValue {
+            size: [5, 1, 1, 1],
+            values: vec![0.4196651, 0.7859788, 0.84304845, 0.56487226, 0.15387845],
+        }],
+    );
+}
+
+#[test]
+fn spiral() {
+    assert_output(
+        "⟜(×20-⊸¬÷⟜⇡)200",
+        vec![
+            ReadBackValue {
+                size: [200, 1, 1, 1],
+                values: vec![
+                    -20.0,
+                    -19.8,
+                    -19.6,
+                    -19.400002,
+                    -19.2,
+                    -19.0,
+                    -18.800001,
+                    -18.599998,
+                    -18.4,
+                    -18.199999,
+                    -18.0,
+                    -17.8,
+                    -17.6,
+                    -17.4,
+                    -17.2,
+                    -17.0,
+                    -16.800001,
+                    -16.6,
+                    -16.400002,
+                    -16.2,
+                    -15.999999,
+                    -15.799999,
+                    -15.599999,
+                    -15.4,
+                    -15.2,
+                    -15.0,
+                    -14.8,
+                    -14.6,
+                    -14.400001,
+                    -14.200001,
+                    -14.000001,
+                    -13.800001,
+                    -13.600001,
+                    -13.4,
+                    -13.199999,
+                    -13.0,
+                    -12.799999,
+                    -12.6,
+                    -12.4,
+                    -12.200001,
+                    -12.0,
+                    -11.800001,
+                    -11.6,
+                    -11.400002,
+                    -11.200001,
+                    -10.999999,
+                    -10.799999,
+                    -10.599999,
+                    -10.4,
+                    -10.2,
+                    -10.0,
+                    -9.8,
+                    -9.6,
+                    -9.400001,
+                    -9.200001,
+                    -9.0,
+                    -8.8,
+                    -8.6,
+                    -8.4,
+                    -8.2,
+                    -8.0,
+                    -7.7999997,
+                    -7.6,
+                    -7.4,
+                    -7.2000003,
+                    -7.0000005,
+                    -6.8000007,
+                    -6.600001,
+                    -6.4000006,
+                    -6.200001,
+                    -6.000001,
+                    -5.7999997,
+                    -5.6,
+                    -5.4,
+                    -5.2,
+                    -5.0,
+                    -4.8,
+                    -4.6000004,
+                    -4.4000006,
+                    -4.2000003,
+                    -4.0000005,
+                    -3.800001,
+                    -3.6000009,
+                    -3.400001,
+                    -3.1999998,
+                    -2.9999998,
+                    -2.8,
+                    -2.6000001,
+                    -2.4000003,
+                    -2.2000003,
+                    -2.0000005,
+                    -1.8000005,
+                    -1.6000006,
+                    -1.4000008,
+                    -1.2000008,
+                    -1.000001,
+                    -0.79999983,
+                    -0.59999996,
+                    -0.40000004,
+                    -0.20000012,
+                    -2.2351742e-7,
+                    0.19999968,
+                    0.3999996,
+                    0.5999995,
+                    0.79999936,
+                    0.9999993,
+                    1.1999998,
+                    1.3999997,
+                    1.5999997,
+                    1.7999995,
+                    1.9999994,
+                    2.1999993,
+                    2.3999999,
+                    2.5999997,
+                    2.7999997,
+                    2.9999995,
+                    3.1999993,
+                    3.3999994,
+                    3.5999992,
+                    3.7999997,
+                    3.9999998,
+                    4.2,
+                    4.3999996,
+                    4.5999994,
+                    4.799999,
+                    4.9999995,
+                    5.2,
+                    5.3999996,
+                    5.5999994,
+                    5.799999,
+                    5.999999,
+                    6.199999,
+                    6.3999996,
+                    6.5999994,
+                    6.799999,
+                    6.999999,
+                    7.199999,
+                    7.3999987,
+                    7.6,
+                    7.7999997,
+                    7.9999995,
+                    8.199999,
+                    8.4,
+                    8.599998,
+                    8.799999,
+                    9.0,
+                    9.2,
+                    9.4,
+                    9.599999,
+                    9.799999,
+                    9.999999,
+                    10.2,
+                    10.4,
+                    10.599999,
+                    10.799999,
+                    10.999999,
+                    11.199999,
+                    11.4,
+                    11.599999,
+                    11.799999,
+                    11.999999,
+                    12.199999,
+                    12.399999,
+                    12.599998,
+                    12.799999,
+                    13.0,
+                    13.199999,
+                    13.4,
+                    13.599998,
+                    13.799999,
+                    14.0,
+                    14.2,
+                    14.4,
+                    14.599999,
+                    14.799999,
+                    14.999999,
+                    15.2,
+                    15.4,
+                    15.599999,
+                    15.799999,
+                    15.999999,
+                    16.199999,
+                    16.399998,
+                    16.6,
+                    16.8,
+                    17.0,
+                    17.199999,
+                    17.4,
+                    17.599998,
+                    17.8,
+                    18.0,
+                    18.199999,
+                    18.4,
+                    18.599998,
+                    18.8,
+                    18.999998,
+                    19.199999,
+                    19.4,
+                    19.599998,
+                    19.8,
+                ],
+            },
+            ReadBackValue::scalar(200.0),
+        ],
+    );
 }
