@@ -520,6 +520,7 @@ impl FunctionOrOp {
                     Modifier::Gap => -1,
                     Modifier::By => 1,
                     Modifier::Reduce => 1,
+                    Modifier::On => 1,
                 };
 
                 modifier + code.iter().map(|op| op.stack_delta()).sum::<i32>()
@@ -548,6 +549,7 @@ enum Modifier {
     Dip,
     By,
     Reduce,
+    On,
 }
 
 enum TokenType<'a> {
@@ -623,9 +625,11 @@ enum Token<'source> {
     Ne,
     #[regex(r"neg|¯")]
     Neg,
+    #[regex(r"on|⟜")]
+    On,
     #[regex(r"sqrt|√")]
     Sqrt,
-    #[regex(r"len")]
+    #[regex(r"len|⧻")]
     Len,
     #[regex(r"/")]
     Reduce,
@@ -662,6 +666,7 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Pop => TokenType::Op(Op::Stack(StackOp::Pop)),
         Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
         Token::By => TokenType::Modifier(Modifier::By),
+        Token::On => TokenType::Modifier(Modifier::On),
         Token::Gap => TokenType::Modifier(Modifier::Gap),
         Token::Dip => TokenType::Modifier(Modifier::Dip),
         Token::Back => TokenType::Modifier(Modifier::Back),
@@ -855,6 +860,9 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
                 }
                 Modifier::Dip => {
                     dipped = Some(dag.stack.pop().unwrap());
+                }
+                Modifier::On => {
+                    dipped = Some(*dag.stack.last().unwrap());
                 }
                 Modifier::By => {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
@@ -1469,4 +1477,17 @@ fn rand_average() {
         "back div / (+ rand  dip pop)  range . 10",
         vec![ReadBackValue::scalar(0.5744712)],
     );
+}
+
+#[test]
+fn sum_div_len() {
+    assert_output(
+        "
+            range 4 # [1 5 8 2]
+            ⟜/+ # Sum
+            ⧻   # Length
+            ÷   # Divide
+        ",
+        vec![ReadBackValue::scalar(1.5)],
+    )
 }
