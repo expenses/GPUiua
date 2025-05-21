@@ -28,6 +28,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 Node {
                     op: NodeOp::Dyadic { .. },
                     size: Size::MaxOf(_, _),
+                    ..
                 } => {
                     for (_, index) in dag.parents(index).iter(&dag) {
                         full_eval_to.insert(index, dummy_buffer_index);
@@ -38,6 +39,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 Node {
                     op: NodeOp::Rand,
                     size: Size::Scalar,
+                    ..
                 }
                 | Node {
                     op: NodeOp::Reduce(_),
@@ -176,6 +178,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
             "var random_seed = u32({});\n",
             rng.random::<u32>()
         ));
+        shader.push_str("let thread_coord = Coord(0,0,0,0);\n");
         for line in &pair.admin_lines {
             shader.push_str(&format!("{};\n", line));
         }
@@ -202,14 +205,17 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     ShaderModule {
         code: shader,
         num_functions: step_index,
-        final_stack_len: final_stack.len(),
+        final_stack_data: final_stack
+            .iter()
+            .map(|index| dag[*index].is_string)
+            .collect(),
     }
 }
 
 struct ShaderModule {
     code: String,
     num_functions: usize,
-    final_stack_len: usize,
+    final_stack_data: Vec<bool>,
 }
 
 struct Context {
@@ -411,7 +417,7 @@ impl Context {
 
         buffers
             .iter()
-            .take(module.final_stack_len)
+            .take(module.final_stack_data.len())
             .map(|&[x, y, z, w, offset, ..]| ReadBackValue {
                 size: [x, y, z, w],
                 values: values[offset as usize..offset as usize + (x * y * z * w) as usize]
@@ -424,27 +430,35 @@ impl Context {
         &self,
         string: &str,
         left_to_right: bool,
-    ) -> Result<Vec<ReadBackValue>, String> {
+    ) -> Result<(Vec<ReadBackValue>, ShaderModule), String> {
         let module = generate_module(
             parse_code(string, left_to_right)
                 .map_err(|(str, span)| format!("'{}' {:?} '{}'", str, span.clone(), &str[span]))?,
         );
         log::debug!("{}", module.code);
-        Ok(self.run(&module).await)
+        Ok((self.run(&module).await, module))
     }
 
     async fn run_string_and_get_string_output(&self, string: &str, left_to_right: bool) -> String {
-        let values = match self.run_string(string, left_to_right).await {
+        let (values, module) = match self.run_string(string, left_to_right).await {
             Ok(values) => values,
             Err(error) => return format!("{:?}", error),
         };
 
         let mut output = String::new();
 
-        for value in values {
+        for (value, &is_string) in values.iter().zip(&module.final_stack_data) {
             match value.size {
                 [1, 1, 1, 1] => output.push_str(&format!("{}\n", value.values[0])),
-                [_, 1, 1, 1] => output.push_str(&format!("{:?}\n", value.values)),
+                [_, 1, 1, 1] => {
+                    if is_string {
+                        let chars: String =
+                            value.values.iter().map(|&val| val as u8 as char).collect();
+                        output.push_str(&format!("{:?}", chars));
+                    } else {
+                        output.push_str(&format!("{:?}\n", value.values))
+                    }
+                }
                 [x, _, 1, 1] => {
                     for chunk in value.values.chunks(x as usize) {
                         output.push_str(&format!("{:?}\n", chunk));
@@ -502,21 +516,21 @@ enum StackOp {
 }
 
 #[derive(Clone, Debug)]
-enum FunctionOrOp {
-    Op(Op),
+enum FunctionOrOp<'a> {
+    Op(Op<'a>),
     Function {
         modifier: Modifier,
-        code: Vec<FunctionOrOp>,
+        code: Vec<FunctionOrOp<'a>>,
     },
 }
 
-impl FunctionOrOp {
+impl<'a> FunctionOrOp<'a> {
     #[allow(unused)]
     fn stack_delta(&self) -> i32 {
         match self {
             Self::Op(Op::Monadic(_)) => 0,
             Self::Op(Op::Dyadic(_)) => -1,
-            Self::Op(Op::Value(_)) => 1,
+            Self::Op(Op::Value(_)) | Self::Op(Op::String(_)) | Self::Op(Op::Char(_)) => 1,
             Self::Op(Op::Rand) => 1,
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
@@ -544,7 +558,7 @@ impl FunctionOrOp {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Op {
+enum Op<'a> {
     Monadic(MonadicOp),
     Dyadic(DyadicOp),
     Stack(StackOp),
@@ -555,6 +569,8 @@ enum Op {
     Len,
     StartArray,
     EndArray,
+    String(&'a str),
+    Char(char),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -571,15 +587,19 @@ enum Modifier {
 
 enum TokenType<'a> {
     Modifier(Modifier),
-    Op(Op),
+    Op(Op<'a>),
     AssignedOp(&'a str),
 }
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"[ \t]+")]
 enum Token<'source> {
-    #[regex(r"[a-zA-Z_]+[a-zA-Z_0-9]*", priority = 0)]
+    #[regex("@.", |lex| lex.slice().chars().nth(1).unwrap())]
+    Char(char),
+    #[regex("\"[^\"]*\"", |lex| &lex.slice()[1..lex.slice().len()-1])]
     String(&'source str),
+    #[regex(r"[a-zA-Z_]+[a-zA-Z_0-9]*", priority = 0)]
+    AssignedName(&'source str),
     #[regex(r"rows|≡")]
     Rows,
     #[regex(r"add|\+")]
@@ -701,7 +721,9 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Range => TokenType::Op(Op::Range),
         Token::Len => TokenType::Op(Op::Len),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
-        Token::String(string) => TokenType::AssignedOp(string),
+        Token::String(string) => TokenType::Op(Op::String(string)),
+        Token::Char(char) => TokenType::Op(Op::Char(char)),
+        Token::AssignedName(string) => TokenType::AssignedOp(string),
         Token::OpenParen
         | Token::CloseParen
         | Token::ArrayLeft
@@ -720,7 +742,7 @@ fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, (&st
             .unwrap_or(line);
         let mut lexer = Token::lexer(line).spanned().peekable();
 
-        if let Some((Ok(Token::String(name)), span)) = lexer.peek().cloned() {
+        if let Some((Ok(Token::AssignedName(name)), span)) = lexer.peek().cloned() {
             if assignments.contains_key(name) {
                 let blocks = parse_code_blocks(lexer, left_to_right, &assignments)
                     .map_err(|span| (line, span))?;
@@ -751,8 +773,8 @@ fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, (&st
 fn parse_code_blocks<'a>(
     mut lexer: std::iter::Peekable<logos::SpannedIter<'a, Token<'a>>>,
     left_to_right: bool,
-    assignments: &HashMap<&str, Vec<FunctionOrOp>>,
-) -> Result<Vec<FunctionOrOp>, Range<usize>> {
+    assignments: &HashMap<&str, Vec<FunctionOrOp<'a>>>,
+) -> Result<Vec<FunctionOrOp<'a>>, Range<usize>> {
     let mut blocks = Vec::new();
 
     loop {
@@ -773,8 +795,8 @@ fn parse_code_blocks<'a>(
 fn parse_code_blocks_inner<'a>(
     lexer: &mut std::iter::Peekable<logos::SpannedIter<'a, Token<'a>>>,
     left_to_right: bool,
-    assignments: &HashMap<&str, Vec<FunctionOrOp>>,
-) -> Result<Vec<FunctionOrOp>, Range<usize>> {
+    assignments: &HashMap<&str, Vec<FunctionOrOp<'a>>>,
+) -> Result<Vec<FunctionOrOp<'a>>, Range<usize>> {
     let (token, span) = match lexer.next() {
         Some((Ok(token), span)) => (token, span),
         Some((Err(()), span)) => return Err(span),
@@ -835,6 +857,12 @@ fn parse_code_blocks_inner<'a>(
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
+enum ArrayContents {
+    Stack(Vec<daggy::NodeIndex>),
+    Chars(Vec<char>),
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 enum NodeOp {
     Monadic(MonadicOp),
     Dyadic { is_table: bool, op: DyadicOp },
@@ -845,19 +873,20 @@ enum NodeOp {
     Value(ordered_float::OrderedFloat<f32>),
     ReduceResult,
     Reduce(daggy::NodeIndex),
-    CreateArray(Vec<daggy::NodeIndex>),
+    CreateArray(ArrayContents),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct Node {
     op: NodeOp,
     size: Size,
+    is_string: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 enum Size {
     Scalar,
-    KnownSize([u32; 4]),
+    Known([u32; 4]),
     RangeOf(daggy::NodeIndex),
     MaxOf(daggy::NodeIndex, daggy::NodeIndex),
     TransposeSizeOf(daggy::NodeIndex, daggy::NodeIndex),
@@ -943,6 +972,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                         Node {
                             op: NodeOp::ReduceResult,
                             size: Size::Scalar,
+                            is_string: false,
                         },
                         vec![],
                     );
@@ -964,6 +994,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     Node {
                         op: NodeOp::Reduce(reducing),
                         size: Size::Scalar,
+                        is_string: false,
                     },
                     vec![parent],
                 );
@@ -973,13 +1004,32 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 dag.push(value);
             }
         }
+        FunctionOrOp::Op(Op::Char(char)) => dag.insert_node(
+            Node {
+                op: NodeOp::Value((char as u32 as f32).into()),
+                size: override_size.unwrap_or(Size::Scalar),
+                is_string: true,
+            },
+            vec![],
+        ),
+        FunctionOrOp::Op(Op::String(string)) => {
+            dag.insert_node(
+                Node {
+                    op: NodeOp::CreateArray(ArrayContents::Chars(string.chars().collect())),
+                    size: Size::Known([string.len() as _, 1, 1, 1]),
+                    is_string: true,
+                },
+                vec![],
+            );
+        }
         FunctionOrOp::Op(Op::EndArray) => {
             let array_len = dag.pushes_since_array_began.pop().unwrap();
             let items: Vec<_> = (0..array_len).map(|_| dag.stack.pop().unwrap()).collect();
             dag.insert_node(
                 Node {
-                    op: NodeOp::CreateArray(items.clone()),
-                    size: Size::KnownSize([items.len() as _, 1, 1, 1]),
+                    op: NodeOp::CreateArray(ArrayContents::Stack(items.clone())),
+                    size: Size::Known([items.len() as _, 1, 1, 1]),
+                    is_string: false,
                 },
                 items,
             );
@@ -991,6 +1041,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
             Node {
                 op: NodeOp::Rand,
                 size: override_size.unwrap_or(Size::Scalar),
+                is_string: false,
             },
             vec![],
         ),
@@ -998,6 +1049,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
             Node {
                 op: NodeOp::Value(value.into()),
                 size: override_size.unwrap_or(Size::Scalar),
+                is_string: false,
             },
             vec![],
         ),
@@ -1034,6 +1086,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 Node {
                     op: NodeOp::Len,
                     size: Size::Scalar,
+                    is_string: false,
                 },
                 vec![parent_index],
             );
@@ -1044,6 +1097,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 Node {
                     op: NodeOp::Range,
                     size: Size::RangeOf(parent_index),
+                    is_string: false,
                 },
                 vec![parent_index],
             );
@@ -1055,6 +1109,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 Node {
                     op: NodeOp::Rev,
                     size,
+                    is_string: dag.inner[index].is_string,
                 },
                 vec![index],
             );
@@ -1066,6 +1121,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 Node {
                     op: NodeOp::Monadic(op),
                     size: override_size.unwrap_or(size),
+                    is_string: false,
                 },
                 vec![index],
             );
@@ -1080,13 +1136,14 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     is_table: matches!(override_size, Some(Size::TransposeSizeOf(_, _))),
                     op,
                 },
+                is_string: false,
                 size: if let Some(size) = override_size {
                     size
                 } else {
                     match (x_val.size, y_val.size) {
                         (Size::Scalar, Size::Scalar) => Size::Scalar,
-                        (Size::KnownSize(size), Size::Scalar) => Size::KnownSize(size),
-                        (Size::KnownSize(x), Size::KnownSize(y)) => Size::KnownSize([
+                        (Size::Known(size), Size::Scalar) => Size::Known(size),
+                        (Size::Known(x), Size::Known(y)) => Size::Known([
                             x[0].max(y[0]),
                             x[1].max(y[1]),
                             x[2].max(y[2]),
@@ -1153,16 +1210,24 @@ fn evaluate_scalar<R: Rng>(
     match &context.dag[index].op {
         NodeOp::CreateArray(items) => {
             let size = match context.dag[index].size {
-                Size::KnownSize([x, 1, 1, 1]) => x,
+                Size::Known([x, 1, 1, 1]) => x,
+                Size::Scalar => 1,
                 _ => unreachable!(),
             };
 
             if size > 0 {
-                let children = items
-                    .iter()
-                    .map(|child| evaluate_scalar(context, false, *child))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let children = match items {
+                    ArrayContents::Stack(indices) => indices
+                        .iter()
+                        .map(|child| evaluate_scalar(context, false, *child))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    ArrayContents::Chars(chars) => chars
+                        .iter()
+                        .map(|&char| format!("{}", char as u32))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                };
 
                 context.functions.insert(
                     index,
@@ -1178,7 +1243,7 @@ fn evaluate_scalar<R: Rng>(
                 );
                 format!("created_array_{}(thread_coord[0])", index.index())
             } else {
-                format!("0")
+                "0".to_string()
             }
         }
         NodeOp::Reduce(reducing) => {
@@ -1311,7 +1376,7 @@ fn evaluate_size<R: Rng>(
             evaluate_size(context, false, *a),
             evaluate_size(context, false, *b)
         ),
-        Size::KnownSize([x, y, z, w]) => format!("Coord({}, {}, {}, {})", x, y, z, w),
+        Size::Known([x, y, z, w]) => format!("Coord({}, {}, {}, {})", x, y, z, w),
     }
 }
 
@@ -1405,7 +1470,8 @@ fn cast_slice<T>(slice: &[u8]) -> &[T] {
 fn assert_output(string: &str, output: Vec<ReadBackValue>) {
     pollster::block_on(async {
         let context = Context::new().await;
-        assert_eq!(context.run_string(string, false).await.unwrap(), output);
+        let (values, _module) = context.run_string(string, false).await.unwrap();
+        assert_eq!(values, output);
     })
 }
 
