@@ -10,22 +10,29 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         .map(|(i, &index)| (index, i))
         .collect();
     let mut dummy_buffer_index = final_stack.len();
-    for index in dag.graph().node_indices() {
-        let node = &dag[index];
-        // todo: check if this value is actually reachable
-        if let Node {
-            op: NodeOp::Rand,
-            size: Size::Scalar, //Size::TransposeSizeOf(_, _),
-        } = node
-        {
-            // doesn't work. would need to walk whole tree and see if output is also scalar.
-            //let all_children_scalar = dag.children(index).iter(&dag).all(|(_, child)| dag[child].size == Size::Scalar);
-            //if all_children_scalar {
-            //    continue;
-            //}
 
-            full_eval_to.insert(index, dummy_buffer_index);
-            dummy_buffer_index += 1;
+    {
+        let mut walk_stack = final_stack.clone();
+        while let Some(index) = walk_stack.pop() {
+            for (_, parent) in dag.parents(index).iter(&dag) {
+                walk_stack.push(parent);
+            }
+
+            let node = &dag[index];
+            match node {
+                Node {
+                    op: NodeOp::Rand,
+                    size: Size::Scalar,
+                }
+                | Node {
+                    op: NodeOp::Reduce(_),
+                    ..
+                } => {
+                    full_eval_to.insert(index, dummy_buffer_index);
+                    dummy_buffer_index += 1;
+                }
+                _ => {}
+            }
         }
     }
 
@@ -43,7 +50,13 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let mut node_to_allocation = HashMap::new();
 
     for (&item, &i) in &full_eval_to {
-        let size = evaluate_size(&dag, &mut code_builder.aux_functions, &full_eval_to, item);
+        let size = evaluate_size(
+            &dag,
+            &mut code_builder.aux_functions,
+            &full_eval_to,
+            &mut rng,
+            item,
+        );
         code_builder.functions[0]
             .admin_lines
             .push(format!("allocate({}, {})", i, size));
@@ -61,6 +74,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                         &dag,
                         &mut code_builder.aux_functions,
                         &full_eval_to,
+                        &mut rng,
                         true,
                         item
                     )
@@ -93,6 +107,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                             &dag,
                             &mut code_builder.aux_functions,
                             &full_eval_to,
+                            &mut rng,
                             true,
                             item
                         )
@@ -113,7 +128,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     let mut shader = include_str!("../out.wgsl").to_string();
 
-    for function in code_builder.aux_functions {
+    for (_, function) in code_builder.aux_functions {
         shader.push_str(&function);
         shader.push('\n');
     }
@@ -417,7 +432,7 @@ impl Context {
 }
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     ops::Range,
 };
 
@@ -487,6 +502,7 @@ impl FunctionOrOp {
                     Modifier::Table => 0,
                     Modifier::Gap => -1,
                     Modifier::By => 1,
+                    Modifier::Reduce => 1,
                 };
 
                 modifier + code.iter().map(|op| op.stack_delta()).sum::<i32>()
@@ -513,6 +529,7 @@ enum Modifier {
     Gap,
     Dip,
     By,
+    Reduce,
 }
 
 enum TokenType<'a> {
@@ -534,8 +551,12 @@ enum Token<'source> {
     Rand,
     #[regex(r"div|÷")]
     Div,
-    #[regex(r"eq|=")]
+    #[token("eq")]
     Eq,
+    #[token("=")]
+    EqualSign,
+    #[token("←")]
+    Assignment,
     #[regex(r"range|⇡")]
     Range,
     #[regex(r"table|⊞")]
@@ -586,6 +607,8 @@ enum Token<'source> {
     Neg,
     #[regex(r"sqrt|√")]
     Sqrt,
+    #[regex(r"/")]
+    Reduce,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -608,7 +631,7 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Lt => TokenType::Op(Op::Dyadic(DyadicOp::Lt)),
         Token::Le => TokenType::Op(Op::Dyadic(DyadicOp::Le)),
         Token::Ne => TokenType::Op(Op::Dyadic(DyadicOp::Ne)),
-        Token::Eq => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
+        Token::Eq | Token::EqualSign => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
         Token::Add => TokenType::Op(Op::Dyadic(DyadicOp::Add)),
         Token::Mul => TokenType::Op(Op::Dyadic(DyadicOp::Mul)),
         Token::Div => TokenType::Op(Op::Dyadic(DyadicOp::Div)),
@@ -623,12 +646,13 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Dip => TokenType::Modifier(Modifier::Dip),
         Token::Back => TokenType::Modifier(Modifier::Back),
         Token::Table => TokenType::Modifier(Modifier::Table),
+        Token::Reduce => TokenType::Modifier(Modifier::Reduce),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
         Token::String(string) => TokenType::AssignedOp(string),
-        Token::OpenParen | Token::CloseParen => return None,
+        Token::OpenParen | Token::CloseParen | Token::Assignment => return None,
     })
 }
 
@@ -650,7 +674,7 @@ fn parse_code(code: &str, left_to_right: bool) -> Result<Vec<FunctionOrOp>, (&st
             } else {
                 let _ = lexer.next().unwrap();
                 match lexer.next() {
-                    Some((Ok(Token::Eq), _)) => {}
+                    Some((Ok(Token::EqualSign | Token::Assignment), _)) => {}
                     Some((_, span)) => return Err((line, span)),
                     None => {
                         return Err((line, span));
@@ -752,6 +776,8 @@ enum NodeOp {
     Rev,
     Rand,
     Value(ordered_float::OrderedFloat<f32>),
+    ReduceResult,
+    Reduce(daggy::NodeIndex),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -768,33 +794,35 @@ enum Size {
     TransposeSizeOf(daggy::NodeIndex, daggy::NodeIndex),
 }
 
+#[derive(Default)]
 struct Dag {
     inner: daggy::Dag<Node, ()>,
     stack: Vec<daggy::NodeIndex>,
+    duplicate_map: HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
 }
 
-fn handle_op(
-    op: FunctionOrOp,
-    dag: &mut Dag,
-    map: &mut HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
-    mut table_of_size: Option<Size>,
-) {
-    let mut insert_node = |dag: &mut Dag, parent_indices: Vec<daggy::NodeIndex>, node: Node| {
+impl Dag {
+    fn insert_node(&mut self, node: Node, parent_indices: Vec<daggy::NodeIndex>) {
         let index = if node.op == NodeOp::Rand {
-            dag.inner.add_node(node)
+            self.inner.add_node(node)
         } else {
-            *map.entry((node.clone(), parent_indices.clone()))
-                .or_insert_with(|| dag.inner.add_node(node))
+            *self
+                .duplicate_map
+                .entry((node.clone(), parent_indices.clone()))
+                .or_insert_with(|| self.inner.add_node(node))
         };
         for parent_index in parent_indices {
-            dag.inner.update_edge(parent_index, index, ()).unwrap();
+            self.inner.update_edge(parent_index, index, ()).unwrap();
         }
-        dag.stack.push(index);
-    };
+        self.stack.push(index);
+    }
+}
 
+fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
     match op {
         FunctionOrOp::Function { modifier, code } => {
             let mut dipped = None;
+            let mut reducing = None;
 
             match modifier {
                 Modifier::Back => {
@@ -807,7 +835,14 @@ fn handle_op(
                     dipped = Some(dag.stack.pop().unwrap());
                 }
                 Modifier::By => {
-                    dag.stack.push(*dag.stack.last().unwrap());
+                    let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
+                    match stack_delta {
+                        1..=i32::MAX => {}
+                        other => {
+                            let index = (dag.stack.len() as i32 - 1 + other) as usize;
+                            dag.stack.insert(index, *dag.stack.get(index).unwrap());
+                        }
+                    }
                 }
                 Modifier::Gap => {
                     dag.stack.pop().unwrap();
@@ -817,31 +852,55 @@ fn handle_op(
                     let y = dag.stack.get(dag.stack.len() - 2).unwrap();
                     table_of_size = Some(Size::TransposeSizeOf(*x, *y));
                 }
+                Modifier::Reduce => {
+                    let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
+                    assert_eq!(stack_delta, -1);
+                    let reducing_array = *dag.stack.last().unwrap();
+                    let reducing_array_size = dag.inner[reducing_array].size;
+                    reducing = Some(*dag.stack.last().unwrap());
+                    dag.insert_node(
+                        Node {
+                            op: NodeOp::ReduceResult,
+                            size: Size::Scalar,
+                        },
+                        vec![],
+                    );
+                    table_of_size = Some(reducing_array_size);
+                }
             }
 
             for op in code {
-                handle_op(op, dag, map, table_of_size);
+                handle_op(op, dag, table_of_size);
+            }
+
+            if let Some(reducing) = reducing {
+                let parent = dag.stack.pop().unwrap();
+                dag.insert_node(
+                    Node {
+                        op: NodeOp::Reduce(reducing),
+                        size: Size::Scalar,
+                    },
+                    vec![parent],
+                );
             }
 
             if let Some(value) = dipped {
                 dag.stack.push(value);
             }
         }
-        FunctionOrOp::Op(Op::Rand) => insert_node(
-            dag,
-            vec![],
+        FunctionOrOp::Op(Op::Rand) => dag.insert_node(
             Node {
                 op: NodeOp::Rand,
                 size: table_of_size.unwrap_or(Size::Scalar),
             },
-        ),
-        FunctionOrOp::Op(Op::Value(value)) => insert_node(
-            dag,
             vec![],
+        ),
+        FunctionOrOp::Op(Op::Value(value)) => dag.insert_node(
             Node {
                 op: NodeOp::Value(value.into()),
                 size: table_of_size.unwrap_or(Size::Scalar),
             },
+            vec![],
         ),
         FunctionOrOp::Op(Op::Stack(StackOp::Dup)) => {
             dag.stack.push(*dag.stack.last().unwrap());
@@ -854,41 +913,38 @@ fn handle_op(
             let index = dag.stack.pop().unwrap();
             let mut node = dag.inner[index].clone();
             node.size = table_of_size.unwrap_or(node.size);
-            insert_node(dag, vec![index], node);
+            dag.insert_node(node, vec![index]);
         }
         FunctionOrOp::Op(Op::Range) => {
             let parent_index = dag.stack.pop().unwrap();
-            insert_node(
-                dag,
-                vec![parent_index],
+            dag.insert_node(
                 Node {
                     op: NodeOp::Range,
                     size: Size::RangeOf(parent_index),
                 },
+                vec![parent_index],
             );
         }
         FunctionOrOp::Op(Op::Rev) => {
             let index = dag.stack.pop().unwrap();
             let size = dag.inner[index].size;
-            insert_node(
-                dag,
-                vec![index],
+            dag.insert_node(
                 Node {
                     op: NodeOp::Rev,
                     size,
                 },
+                vec![index],
             );
         }
         FunctionOrOp::Op(Op::Monadic(op)) => {
             let index = dag.stack.pop().unwrap();
             let size = dag.inner[index].size;
-            insert_node(
-                dag,
-                vec![index],
+            dag.insert_node(
                 Node {
                     op: NodeOp::Monadic(op),
                     size: table_of_size.unwrap_or(size),
                 },
+                vec![index],
             );
         }
         FunctionOrOp::Op(Op::Dyadic(op)) => {
@@ -898,7 +954,7 @@ fn handle_op(
             let y_val = &dag.inner[y];
             let node = Node {
                 op: NodeOp::Dyadic {
-                    is_table: table_of_size.is_some(),
+                    is_table: matches!(table_of_size, Some(Size::TransposeSizeOf(_, _))),
                     op,
                 },
                 size: if let Some(size) = table_of_size {
@@ -923,20 +979,16 @@ fn handle_op(
                     }
                 },
             };
-            insert_node(dag, vec![x, y], node);
+            dag.insert_node(node, vec![x, y]);
         }
     }
 }
 
 fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<daggy::NodeIndex>) {
-    let mut dag = Dag {
-        inner: daggy::Dag::<Node, ()>::new(),
-        stack: Vec::new(),
-    };
-    let mut map = HashMap::new();
+    let mut dag = Dag::default();
 
     for op in code {
-        handle_op(op, &mut dag, &mut map, None);
+        handle_op(op, &mut dag, None);
     }
 
     (dag.inner, dag.stack)
@@ -945,10 +997,11 @@ fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<dagg
 use daggy::Walker;
 use rand::SeedableRng;
 
-fn evaluate_scalar(
+fn evaluate_scalar<R: Rng>(
     dag: &daggy::Dag<Node, ()>,
-    functions: &mut HashSet<String>,
+    functions: &mut AuxFunctions,
     full_eval_to: &BTreeMap<daggy::NodeIndex, usize>,
+    rng: &mut R,
     top_level_eval: bool,
     index: NodeIndex,
 ) -> String {
@@ -963,6 +1016,37 @@ fn evaluate_scalar(
     }
 
     match &dag[index].op {
+        NodeOp::Reduce(reducing) => {
+            let function = format!(
+                "fn reduce_{}() -> f32 {{
+                    var thread_coord = Coord(0, 0, 0, 0);
+                    let dispatch_size = {};
+                    var thread = vec3(coord_to_index(thread_coord, dispatch_size), 0, 0);
+                    var reduction = {};
+                    for (thread_coord[0] = 1; thread_coord[0] < dispatch_size[0]; thread_coord[0]++) {{
+                        thread = vec3(coord_to_index(thread_coord, dispatch_size), 0, 0);
+                        var random_seed = u32({}) + thread.x;
+                        reduction = {};
+                    }}
+                    return reduction;
+                }}",
+                index.index(),
+                evaluate_size(dag, functions, full_eval_to, rng, *reducing),
+                evaluate_scalar(dag, functions, full_eval_to, rng, false, *reducing),
+                rng.random::<u32>(),
+                evaluate_scalar(
+                    dag,
+                    functions,
+                    full_eval_to,
+                    rng,
+                    false,
+                    dag.parents(index).walk_next(dag).unwrap().1
+                )
+            );
+            functions.insert(index.index(), function);
+            format!("reduce_{}()", index.index())
+        }
+        NodeOp::ReduceResult => "reduction".to_string(),
         NodeOp::Monadic(op) => format!(
             "{}({})",
             format!("{:?}", op).to_lowercase(),
@@ -970,6 +1054,7 @@ fn evaluate_scalar(
                 dag,
                 functions,
                 full_eval_to,
+                rng,
                 false,
                 dag.parents(index).walk_next(dag).unwrap().1
             )
@@ -980,22 +1065,23 @@ fn evaluate_scalar(
                 dag,
                 functions,
                 full_eval_to,
+                rng,
                 false,
                 parents.walk_next(dag).unwrap().1,
             );
             let arg_1 = parents
                 .walk_next(dag)
-                .map(|parent| evaluate_scalar(dag, functions, full_eval_to, false, parent.1))
+                .map(|parent| evaluate_scalar(dag, functions, full_eval_to, rng, false, parent.1))
                 .unwrap_or_else(|| arg_0.clone());
 
             if *is_table {
-                functions.insert(format!(
-                    "fn eval_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
+                functions.insert(index.index(), format!(
+                    "fn table_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
                     index.index(),
                     arg_0
                 ));
                 arg_0 = format!(
-                    "eval_{}(coord_transpose(thread_coord), dispatch_size)",
+                    "table_{}(coord_transpose(thread_coord), dispatch_size)",
                     index.index()
                 );
             }
@@ -1012,43 +1098,51 @@ fn evaluate_scalar(
         NodeOp::Rand => "random_uniform(random_seed)".to_string(),
         NodeOp::Rev => {
             let function = format!(
-                "fn eval_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
+                "fn rev_{}(thread_coord: Coord, dispatch_size: Coord, thread: vec3<u32>) -> f32 {{
+                    var random_seed = u32({}) + thread.x;
+                    return {};
+                }}",
                 index.index(),
+                rng.random::<u32>(),
                 evaluate_scalar(
                     dag,
                     functions,
                     full_eval_to,
+                    rng,
                     false,
                     dag.parents(index).walk_next(dag).unwrap().1
                 )
             );
-            functions.insert(function);
+            functions.insert(index.index(), function);
             format!(
-                "eval_{}(coord_reverse(thread_coord, dispatch_size), dispatch_size)",
+                "rev_{}(coord_reverse(thread_coord, dispatch_size), dispatch_size, thread)",
                 index.index(),
             )
         }
     }
 }
 
-fn evaluate_size(
+type AuxFunctions = HashMap<usize, String>;
+
+fn evaluate_size<R: Rng>(
     dag: &daggy::Dag<Node, ()>,
-    functions: &mut HashSet<String>,
+    functions: &mut AuxFunctions,
     full_eval_to: &BTreeMap<daggy::NodeIndex, usize>,
+    rng: &mut R,
     index: NodeIndex,
 ) -> String {
     match &dag[index].size {
         Size::RangeOf(range) => {
             format!(
                 "Coord(u32({}), 1, 1, 1)",
-                evaluate_scalar(dag, functions, full_eval_to, false, *range)
+                evaluate_scalar(dag, functions, full_eval_to, rng, false, *range)
             )
         }
         Size::Scalar => "Coord(1,1,1,1)".to_string(),
         Size::TransposeSizeOf(a, b) => format!(
-            "coord_max(coord_transpose({}), {})",
-            evaluate_size(dag, functions, full_eval_to, *a),
-            evaluate_size(dag, functions, full_eval_to, *b)
+            "coord_max({}, coord_transpose({}))",
+            evaluate_size(dag, functions, full_eval_to, rng, *a),
+            evaluate_size(dag, functions, full_eval_to, rng, *b)
         ),
         _ => panic!(),
     }
@@ -1062,7 +1156,7 @@ struct FunctionPair {
 }
 
 struct CodeBuilder {
-    aux_functions: HashSet<String>,
+    aux_functions: AuxFunctions,
     functions: Vec<FunctionPair>,
     next_dispatch_index: usize,
     size_to_function_index: HashMap<Size, usize>,
@@ -1258,6 +1352,30 @@ fn table_pop_in_parens() {
 }
 
 #[test]
+fn reduce_mul() {
+    assert_output("/*  + 1 range 3", vec![ReadBackValue::scalar(6.0)]);
+}
+
+#[test]
+fn by_modifier() {
+    assert_output(
+        "⊸÷ 2 5",
+        vec![ReadBackValue::scalar(5.0), ReadBackValue::scalar(2.5)],
+    );
+    assert_output(
+        "
+        tri ← ++
+        ⊸tri 1 2 3
+        ",
+        vec![ReadBackValue::scalar(3.0), ReadBackValue::scalar(6.0)],
+    );
+    assert_output(
+        "⊸5 1",
+        vec![ReadBackValue::scalar(1.0), ReadBackValue::scalar(5.0)],
+    );
+}
+
+#[test]
 fn function_delta() {
     assert_eq!(
         FunctionOrOp::Function {
@@ -1292,5 +1410,27 @@ fn rng_table() {
                 0.705348, 0.974491,
             ],
         }],
+    );
+}
+
+#[test]
+fn rand_in_rev() {
+    assert_output(
+        "rev rev table gap gap rand . range 3",
+        vec![ReadBackValue {
+            size: [3, 3, 1, 1],
+            values: vec![
+                0.4196651, 0.7859788, 0.84304845, 0.56487226, 0.15387845, 0.9303609, 0.51091456,
+                0.705348, 0.974491,
+            ],
+        }],
+    );
+}
+
+#[test]
+fn rand_average() {
+    assert_output(
+        "back div / (+ rand  dip pop)  range . 10",
+        vec![ReadBackValue::scalar(0.5744712)],
     );
 }
