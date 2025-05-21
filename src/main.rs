@@ -26,6 +26,16 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
             let node = &dag[index];
             match node {
                 Node {
+                    op: NodeOp::Dyadic { .. },
+                    size: Size::MaxOf(_, _),
+                } => {
+                    for (_, index) in dag.parents(index).iter(&dag) {
+                        full_eval_to.insert(index, dummy_buffer_index);
+                        size_to_buffer.insert(node.size, dummy_buffer_index);
+                        dummy_buffer_index += 1;
+                    }
+                }
+                Node {
                     op: NodeOp::Rand,
                     size: Size::Scalar,
                 }
@@ -512,6 +522,9 @@ impl FunctionOrOp {
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
             Self::Op(Op::Len | Op::Rev | Op::Range) => 0,
+            Self::Op(Op::EndArray) => 0,
+            // Tricky
+            Self::Op(Op::StartArray) => 0,
             Self::Function { modifier, code } => {
                 let modifier = match *modifier {
                     Modifier::Back => 0,
@@ -539,6 +552,8 @@ enum Op {
     Rev,
     Rand,
     Len,
+    StartArray,
+    EndArray,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -639,6 +654,10 @@ enum Token<'source> {
     OpenParen,
     #[token(")")]
     CloseParen,
+    #[token("[")]
+    ArrayLeft,
+    #[token("]")]
+    ArrayRight,
 }
 
 fn parse(token: Token) -> Option<TokenType> {
@@ -678,7 +697,11 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Len => TokenType::Op(Op::Len),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
         Token::String(string) => TokenType::AssignedOp(string),
-        Token::OpenParen | Token::CloseParen | Token::Assignment => return None,
+        Token::OpenParen
+        | Token::CloseParen
+        | Token::ArrayLeft
+        | Token::ArrayRight
+        | Token::Assignment => return None,
     })
 }
 
@@ -790,7 +813,19 @@ fn parse_code_blocks_inner<'a>(
                 }])
             }
         }
-        None => Err(span),
+        None => match token {
+            Token::ArrayLeft => Ok(vec![FunctionOrOp::Op(if left_to_right {
+                Op::StartArray
+            } else {
+                Op::EndArray
+            })]),
+            Token::ArrayRight => Ok(vec![FunctionOrOp::Op(if left_to_right {
+                Op::EndArray
+            } else {
+                Op::StartArray
+            })]),
+            _ => Err(span),
+        },
     }
 }
 
@@ -805,6 +840,7 @@ enum NodeOp {
     Value(ordered_float::OrderedFloat<f32>),
     ReduceResult,
     Reduce(daggy::NodeIndex),
+    CreateArray(Vec<daggy::NodeIndex>),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -816,6 +852,7 @@ struct Node {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 enum Size {
     Scalar,
+    KnownSize([u32; 4]),
     RangeOf(daggy::NodeIndex),
     MaxOf(daggy::NodeIndex, daggy::NodeIndex),
     TransposeSizeOf(daggy::NodeIndex, daggy::NodeIndex),
@@ -826,9 +863,18 @@ struct Dag {
     inner: daggy::Dag<Node, ()>,
     stack: Vec<daggy::NodeIndex>,
     duplicate_map: HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
+    pushes_since_array_began: Vec<usize>,
 }
 
 impl Dag {
+    fn push(&mut self, index: daggy::NodeIndex) {
+        if let Some(count) = self.pushes_since_array_began.last_mut() {
+            *count += 1;
+        }
+
+        self.stack.push(index);
+    }
+
     fn insert_node(&mut self, node: Node, parent_indices: Vec<daggy::NodeIndex>) {
         let index = if node.op == NodeOp::Rand {
             self.inner.add_node(node)
@@ -841,7 +887,7 @@ impl Dag {
         for parent_index in parent_indices {
             self.inner.update_edge(parent_index, index, ()).unwrap();
         }
-        self.stack.push(index);
+        self.push(index);
     }
 }
 
@@ -915,8 +961,22 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
             }
 
             if let Some(value) = dipped {
-                dag.stack.push(value);
+                dag.push(value);
             }
+        }
+        FunctionOrOp::Op(Op::EndArray) => {
+            let array_len = dag.pushes_since_array_began.pop().unwrap();
+            let items: Vec<_> = (0..array_len).map(|_| dag.stack.pop().unwrap()).collect();
+            dag.insert_node(
+                Node {
+                    op: NodeOp::CreateArray(items.clone()),
+                    size: Size::KnownSize([items.len() as _, 1, 1, 1]),
+                },
+                items,
+            );
+        }
+        FunctionOrOp::Op(Op::StartArray) => {
+            dag.pushes_since_array_began.push(0);
         }
         FunctionOrOp::Op(Op::Rand) => dag.insert_node(
             Node {
@@ -933,17 +993,31 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
             vec![],
         ),
         FunctionOrOp::Op(Op::Stack(StackOp::Dup)) => {
-            dag.stack.push(*dag.stack.last().unwrap());
+            // slight hack to make sure that uiua behaviour is copied.
+            if dag.pushes_since_array_began.last() == Some(&0) {
+                let item = dag.stack.pop().unwrap();
+                dag.push(item);
+                dag.push(item);
+            } else {
+                let item = *dag.stack.last().unwrap();
+                dag.push(item);
+            }
         }
         FunctionOrOp::Op(Op::Stack(StackOp::Pop)) => {
-            dag.stack.pop();
+            dag.stack.pop().unwrap();
         }
         FunctionOrOp::Op(Op::Stack(StackOp::Ident)) => {
             // Potentially change size of the node on the top of the stack.
             let index = dag.stack.pop().unwrap();
+            let parents: Vec<_> = dag
+                .inner
+                .parents(index)
+                .iter(&dag.inner)
+                .map(|(_, index)| index)
+                .collect();
             let mut node = dag.inner[index].clone();
             node.size = table_of_size.unwrap_or(node.size);
-            dag.insert_node(node, vec![index]);
+            dag.insert_node(node, parents);
         }
         FunctionOrOp::Op(Op::Len) => {
             let parent_index = dag.stack.pop().unwrap();
@@ -1002,6 +1076,13 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
                 } else {
                     match (x_val.size, y_val.size) {
                         (Size::Scalar, Size::Scalar) => Size::Scalar,
+                        (Size::KnownSize(size), Size::Scalar) => Size::KnownSize(size),
+                        (Size::KnownSize(x), Size::KnownSize(y)) => Size::KnownSize([
+                            x[0].max(y[0]),
+                            x[1].max(y[1]),
+                            x[2].max(y[2]),
+                            x[3].max(y[3]),
+                        ]),
                         (Size::RangeOf(x), Size::RangeOf(y)) if x == y => Size::RangeOf(x),
                         (Size::MaxOf(a, b), Size::MaxOf(c, d))
                             if (a == c && b == d) || (a == d && b == c) =>
@@ -1061,6 +1142,36 @@ fn evaluate_scalar<R: Rng>(
     }
 
     match &context.dag[index].op {
+        NodeOp::CreateArray(items) => {
+            let size = match context.dag[index].size {
+                Size::KnownSize([x, 1, 1, 1]) => x,
+                _ => unreachable!(),
+            };
+
+            if size > 0 {
+                let children = items
+                    .iter()
+                    .map(|child| evaluate_scalar(context, false, *child))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                context.functions.insert(
+                    index,
+                    format!(
+                        "fn created_array_{0}(index: u32) -> f32 {{
+                        let array_{0} = array<f32, {1}>({2});
+                        return array_{0}[index];
+                    }}",
+                        index.index(),
+                        size,
+                        children
+                    ),
+                );
+                format!("created_array_{}(thread_coord[0])", index.index())
+            } else {
+                format!("0")
+            }
+        }
         NodeOp::Reduce(reducing) => {
             let function = format!(
                 "fn reduce_{}() -> f32 {{
@@ -1167,8 +1278,6 @@ fn evaluate_size<R: Rng>(
     top_level_eval: bool,
     index: NodeIndex,
 ) -> String {
-    dbg!(&context.full_eval_to);
-
     if !top_level_eval {
         if let Some(buffer_index) = context.size_to_buffer.get(&context.dag[index].size) {
             return format!("buffers[{}].size", buffer_index);
@@ -1188,7 +1297,12 @@ fn evaluate_size<R: Rng>(
             evaluate_size(context, false, *a),
             evaluate_size(context, false, *b)
         ),
-        _ => panic!(),
+        Size::MaxOf(a, b) => format!(
+            "coord_max({}, {})",
+            evaluate_size(context, false, *a),
+            evaluate_size(context, false, *b)
+        ),
+        Size::KnownSize([x, y, z, w]) => format!("Coord({}, {}, {}, {})", x, y, z, w),
     }
 }
 
@@ -1489,5 +1603,45 @@ fn sum_div_len() {
             ÷   # Divide
         ",
         vec![ReadBackValue::scalar(1.5)],
+    )
+}
+
+#[test]
+fn max_different_sized_arrays() {
+    assert_output(
+        "+ range 5 range 4",
+        vec![ReadBackValue {
+            size: [5, 1, 1, 1],
+            // 7.0 because the read from range 4 is clamped.
+            values: vec![0.0, 2.0, 4.0, 6.0, 7.0],
+        }],
+    )
+}
+
+#[test]
+fn array_creation() {
+    assert_output(
+        "[. rand rand] [1]",
+        vec![
+            ReadBackValue::scalar(1.0),
+            ReadBackValue {
+                size: [3, 1, 1, 1],
+                values: vec![0.96570766, 0.96570766, 0.74225104],
+            },
+        ],
+    )
+}
+
+#[test]
+fn array_creation_mirrors_uiua() {
+    assert_output(
+        "[ident] len range 5 [.]1",
+        vec![
+            ReadBackValue {
+                size: [2, 1, 1, 1],
+                values: vec![1.0; 2],
+            },
+            ReadBackValue::scalar(5.0),
+        ],
     )
 }
