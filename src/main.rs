@@ -9,6 +9,11 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         .enumerate()
         .map(|(i, &index)| (index, i))
         .collect();
+    let mut size_to_buffer: HashMap<Size, usize> = final_stack
+        .iter()
+        .enumerate()
+        .map(|(i, &index)| (dag[index].size, i))
+        .collect();
     let mut dummy_buffer_index = final_stack.len();
 
     {
@@ -29,6 +34,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     ..
                 } => {
                     full_eval_to.insert(index, dummy_buffer_index);
+                    size_to_buffer.insert(node.size, dummy_buffer_index);
                     dummy_buffer_index += 1;
                 }
                 _ => {}
@@ -51,10 +57,14 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     for (&item, &i) in &full_eval_to {
         let size = evaluate_size(
-            &dag,
-            &mut code_builder.aux_functions,
-            &full_eval_to,
-            &mut rng,
+            &mut EvaluationContext {
+                dag: &dag,
+                functions: &mut code_builder.aux_functions,
+                full_eval_to: &full_eval_to,
+                size_to_buffer: &size_to_buffer,
+                rng: &mut rng,
+            },
+            true,
             item,
         );
         code_builder.functions[0]
@@ -71,10 +81,14 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     "write_to_buffer({}, Coord(0,0,0,0), {})",
                     i,
                     evaluate_scalar(
-                        &dag,
-                        &mut code_builder.aux_functions,
-                        &full_eval_to,
-                        &mut rng,
+                        &mut EvaluationContext {
+                            dag: &dag,
+                            functions: &mut code_builder.aux_functions,
+                            full_eval_to: &full_eval_to,
+                            size_to_buffer: &size_to_buffer,
+
+                            rng: &mut rng,
+                        },
                         true,
                         item
                     )
@@ -104,10 +118,14 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                         "write_to_buffer({}, thread_coord, {})",
                         i,
                         evaluate_scalar(
-                            &dag,
-                            &mut code_builder.aux_functions,
-                            &full_eval_to,
-                            &mut rng,
+                            &mut EvaluationContext {
+                                dag: &dag,
+                                functions: &mut code_builder.aux_functions,
+                                full_eval_to: &full_eval_to,
+                                size_to_buffer: &size_to_buffer,
+
+                                rng: &mut rng,
+                            },
                             true,
                             item
                         )
@@ -493,8 +511,7 @@ impl FunctionOrOp {
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
-            Self::Op(Op::Rev) => 0,
-            Self::Op(Op::Range) => 0,
+            Self::Op(Op::Len | Op::Rev | Op::Range) => 0,
             Self::Function { modifier, code } => {
                 let modifier = match *modifier {
                     Modifier::Back => 0,
@@ -520,6 +537,7 @@ enum Op {
     Range,
     Rev,
     Rand,
+    Len,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -607,6 +625,8 @@ enum Token<'source> {
     Neg,
     #[regex(r"sqrt|√")]
     Sqrt,
+    #[regex(r"len")]
+    Len,
     #[regex(r"/")]
     Reduce,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
@@ -650,6 +670,7 @@ fn parse(token: Token) -> Option<TokenType> {
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
+        Token::Len => TokenType::Op(Op::Len),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
         Token::String(string) => TokenType::AssignedOp(string),
         Token::OpenParen | Token::CloseParen | Token::Assignment => return None,
@@ -775,6 +796,7 @@ enum NodeOp {
     Range,
     Rev,
     Rand,
+    Len,
     Value(ordered_float::OrderedFloat<f32>),
     ReduceResult,
     Reduce(daggy::NodeIndex),
@@ -915,6 +937,16 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut table_of_size: Option<Size>) {
             node.size = table_of_size.unwrap_or(node.size);
             dag.insert_node(node, vec![index]);
         }
+        FunctionOrOp::Op(Op::Len) => {
+            let parent_index = dag.stack.pop().unwrap();
+            dag.insert_node(
+                Node {
+                    op: NodeOp::Len,
+                    size: Size::Scalar,
+                },
+                vec![parent_index],
+            );
+        }
         FunctionOrOp::Op(Op::Range) => {
             let parent_index = dag.stack.pop().unwrap();
             dag.insert_node(
@@ -997,17 +1029,22 @@ fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<dagg
 use daggy::Walker;
 use rand::SeedableRng;
 
+struct EvaluationContext<'a, R> {
+    dag: &'a daggy::Dag<Node, ()>,
+    functions: &'a mut AuxFunctions,
+    full_eval_to: &'a BTreeMap<daggy::NodeIndex, usize>,
+    size_to_buffer: &'a HashMap<Size, usize>,
+    rng: &'a mut R,
+}
+
 fn evaluate_scalar<R: Rng>(
-    dag: &daggy::Dag<Node, ()>,
-    functions: &mut AuxFunctions,
-    full_eval_to: &BTreeMap<daggy::NodeIndex, usize>,
-    rng: &mut R,
+    context: &mut EvaluationContext<R>,
     top_level_eval: bool,
     index: NodeIndex,
 ) -> String {
     if !top_level_eval {
-        if let Some(buffer_index) = full_eval_to.get(&index) {
-            return if dag[index].size == Size::Scalar {
+        if let Some(buffer_index) = context.full_eval_to.get(&index) {
+            return if context.dag[index].size == Size::Scalar {
                 format!("read_buffer({}, Coord(0,0,0,0))", buffer_index)
             } else {
                 format!("read_buffer({}, thread_coord)", buffer_index)
@@ -1015,7 +1052,7 @@ fn evaluate_scalar<R: Rng>(
         }
     }
 
-    match &dag[index].op {
+    match &context.dag[index].op {
         NodeOp::Reduce(reducing) => {
             let function = format!(
                 "fn reduce_{}() -> f32 {{
@@ -1031,51 +1068,47 @@ fn evaluate_scalar<R: Rng>(
                     return reduction;
                 }}",
                 index.index(),
-                evaluate_size(dag, functions, full_eval_to, rng, *reducing),
-                evaluate_scalar(dag, functions, full_eval_to, rng, false, *reducing),
-                rng.random::<u32>(),
+                evaluate_size(context, false, *reducing),
+                evaluate_scalar(context, false, *reducing),
+                context.rng.random::<u32>(),
                 evaluate_scalar(
-                    dag,
-                    functions,
-                    full_eval_to,
-                    rng,
+                    context,
                     false,
-                    dag.parents(index).walk_next(dag).unwrap().1
+                    context.dag.parents(index).walk_next(context.dag).unwrap().1
                 )
             );
-            functions.insert(index.index(), function);
+            context.functions.insert(index, function);
             format!("reduce_{}()", index.index())
         }
         NodeOp::ReduceResult => "reduction".to_string(),
+        NodeOp::Len => {
+            let size = evaluate_size(
+                context,
+                false,
+                context.dag.parents(index).walk_next(context.dag).unwrap().1,
+            );
+            format!("f32({}[0])", size)
+        }
         NodeOp::Monadic(op) => format!(
             "{}({})",
             format!("{:?}", op).to_lowercase(),
             evaluate_scalar(
-                dag,
-                functions,
-                full_eval_to,
-                rng,
+                context,
                 false,
-                dag.parents(index).walk_next(dag).unwrap().1
+                context.dag.parents(index).walk_next(context.dag).unwrap().1
             )
         ),
         NodeOp::Dyadic { op, is_table } => {
-            let mut parents = dag.parents(index);
-            let mut arg_0 = evaluate_scalar(
-                dag,
-                functions,
-                full_eval_to,
-                rng,
-                false,
-                parents.walk_next(dag).unwrap().1,
-            );
+            let mut parents = context.dag.parents(index);
+            let mut arg_0 =
+                evaluate_scalar(context, false, parents.walk_next(context.dag).unwrap().1);
             let arg_1 = parents
-                .walk_next(dag)
-                .map(|parent| evaluate_scalar(dag, functions, full_eval_to, rng, false, parent.1))
+                .walk_next(context.dag)
+                .map(|parent| evaluate_scalar(context, false, parent.1))
                 .unwrap_or_else(|| arg_0.clone());
 
             if *is_table {
-                functions.insert(index.index(), format!(
+                context.functions.insert(index, format!(
                     "fn table_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
                     index.index(),
                     arg_0
@@ -1103,17 +1136,14 @@ fn evaluate_scalar<R: Rng>(
                     return {};
                 }}",
                 index.index(),
-                rng.random::<u32>(),
+                context.rng.random::<u32>(),
                 evaluate_scalar(
-                    dag,
-                    functions,
-                    full_eval_to,
-                    rng,
+                    context,
                     false,
-                    dag.parents(index).walk_next(dag).unwrap().1
+                    context.dag.parents(index).walk_next(context.dag).unwrap().1
                 )
             );
-            functions.insert(index.index(), function);
+            context.functions.insert(index, function);
             format!(
                 "rev_{}(coord_reverse(thread_coord, dispatch_size), dispatch_size, thread)",
                 index.index(),
@@ -1122,27 +1152,33 @@ fn evaluate_scalar<R: Rng>(
     }
 }
 
-type AuxFunctions = HashMap<usize, String>;
+type AuxFunctions = HashMap<daggy::NodeIndex, String>;
 
 fn evaluate_size<R: Rng>(
-    dag: &daggy::Dag<Node, ()>,
-    functions: &mut AuxFunctions,
-    full_eval_to: &BTreeMap<daggy::NodeIndex, usize>,
-    rng: &mut R,
+    context: &mut EvaluationContext<R>,
+    top_level_eval: bool,
     index: NodeIndex,
 ) -> String {
-    match &dag[index].size {
+    dbg!(&context.full_eval_to);
+
+    if !top_level_eval {
+        if let Some(buffer_index) = context.size_to_buffer.get(&context.dag[index].size) {
+            return format!("buffers[{}].size", buffer_index);
+        }
+    }
+
+    match &context.dag[index].size {
         Size::RangeOf(range) => {
             format!(
                 "Coord(u32({}), 1, 1, 1)",
-                evaluate_scalar(dag, functions, full_eval_to, rng, false, *range)
+                evaluate_scalar(context, false, *range)
             )
         }
         Size::Scalar => "Coord(1,1,1,1)".to_string(),
         Size::TransposeSizeOf(a, b) => format!(
             "coord_max({}, coord_transpose({}))",
-            evaluate_size(dag, functions, full_eval_to, rng, *a),
-            evaluate_size(dag, functions, full_eval_to, rng, *b)
+            evaluate_size(context, false, *a),
+            evaluate_size(context, false, *b)
         ),
         _ => panic!(),
     }
