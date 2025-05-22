@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::{
     ReadBackValue, Runner,
-    lexing::{DyadicOp, FunctionOrOp, Modifier, Op},
+    lexing::{DyadicOp, FunctionOrOp, MonadicModifier, Op},
 };
 
 #[cfg(test)]
@@ -149,8 +149,8 @@ fn by_modifier() {
 #[test]
 fn function_delta() {
     assert_eq!(
-        FunctionOrOp::Function {
-            modifier: Modifier::Table,
+        FunctionOrOp::MonadicModifierFunction {
+            modifier: MonadicModifier::Table,
             code: vec![FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq))]
         }
         .stack_delta(),
@@ -359,6 +359,35 @@ fn dip_rev() {
             },
         ],
     );
+}
+
+#[test]
+fn below_modifier() {
+    assert_output(
+        "below+ 1 2",
+        vec![
+            ReadBackValue::scalar(2.0),
+            ReadBackValue::scalar(1.0),
+            ReadBackValue::scalar(3.0),
+        ],
+    );
+}
+
+#[test]
+fn fibonacci() {
+    assert_output("⍥◡+9 .1", vec![
+        ReadBackValue::scalar(1.0),
+        ReadBackValue::scalar(1.0),
+        ReadBackValue::scalar(2.0),
+        ReadBackValue::scalar(3.0),
+        ReadBackValue::scalar(5.0),
+        ReadBackValue::scalar(8.0),
+        ReadBackValue::scalar(13.0),
+        ReadBackValue::scalar(21.0),
+        ReadBackValue::scalar(34.0),
+        ReadBackValue::scalar(55.0),
+        ReadBackValue::scalar(89.0),
+    ]);
 }
 
 #[test]

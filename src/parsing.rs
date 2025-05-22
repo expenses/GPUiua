@@ -77,42 +77,53 @@ fn parse_code_blocks_inner<'a>(
         None => return Ok(vec![]),
     };
 
+    let mut get_blocks = |span| {
+        if let Some(&(Ok(Token::OpenParen), _)) = lexer.peek() {
+            let _ = lexer.next();
+            let mut code = Vec::new();
+            loop {
+                if let Some(&(Ok(Token::CloseParen), _)) = lexer.peek() {
+                    let _ = lexer.next();
+                    if !left_to_right {
+                        code.reverse();
+                    }
+                    return Ok(code);
+                }
+
+                code.extend_from_slice(&match parse_code_blocks_inner(
+                    lexer,
+                    left_to_right,
+                    assignments,
+                ) {
+                    Ok(ops) if ops.is_empty() => return Err(span),
+                    Ok(ops) => ops,
+                    Err(span) => return Err(span),
+                })
+            }
+        } else {
+            match parse_code_blocks_inner(lexer, left_to_right, assignments) {
+                Ok(ops) if ops.is_empty() => Err(span),
+                Ok(ops) => Ok(ops),
+                Err(span) => Err(span),
+            }
+        }
+    };
+
     match parse(token) {
         Some(TokenType::AssignedOp(name)) => Ok(assignments.get(name).unwrap().clone()),
         Some(TokenType::Op(op)) => Ok(vec![FunctionOrOp::Op(op)]),
-        Some(TokenType::Modifier(modifier)) => {
-            if let Some(&(Ok(Token::OpenParen), _)) = lexer.peek() {
-                let _ = lexer.next();
-                let mut code = Vec::new();
-                loop {
-                    if let Some(&(Ok(Token::CloseParen), _)) = lexer.peek() {
-                        let _ = lexer.next();
-                        if !left_to_right {
-                            code.reverse();
-                        }
-                        return Ok(vec![FunctionOrOp::Function { modifier, code }]);
-                    }
-
-                    code.extend_from_slice(&match parse_code_blocks_inner(
-                        lexer,
-                        left_to_right,
-                        assignments,
-                    ) {
-                        Ok(ops) if ops.is_empty() => return Err(span),
-                        Ok(ops) => ops,
-                        Err(span) => return Err(span),
-                    })
-                }
-            } else {
-                Ok(vec![FunctionOrOp::Function {
-                    modifier,
-                    code: match parse_code_blocks_inner(lexer, left_to_right, assignments) {
-                        Ok(ops) if ops.is_empty() => return Err(span),
-                        Ok(ops) => ops,
-                        Err(span) => return Err(span),
-                    },
-                }])
-            }
+        Some(TokenType::MonadicModifier(modifier)) => {
+            Ok(vec![FunctionOrOp::MonadicModifierFunction {
+                modifier,
+                code: get_blocks(span)?,
+            }])
+        }
+        Some(TokenType::DyadicModifier(modifier)) => {
+            Ok(vec![FunctionOrOp::DyadicModifierFunction {
+                modifier,
+                code_a: get_blocks(span.clone())?,
+                code_b: get_blocks(span)?,
+            }])
         }
         None => match token {
             Token::ArrayLeft => Ok(vec![FunctionOrOp::Op(if left_to_right {

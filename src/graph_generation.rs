@@ -1,4 +1,6 @@
-use crate::lexing::{DyadicOp, FunctionOrOp, Modifier, MonadicOp, Op, StackOp};
+use crate::lexing::{
+    DyadicModifier, DyadicOp, FunctionOrOp, MonadicModifier, MonadicOp, Op, StackOp,
+};
 use daggy::Walker;
 use std::collections::HashMap;
 
@@ -28,6 +30,7 @@ pub struct Node {
     pub op: NodeOp,
     pub size: Size,
     pub is_string: bool,
+    pub in_loop: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -76,26 +79,55 @@ impl Dag {
     }
 }
 
-fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
+#[derive(Default, Clone)]
+struct ActiveModifiers {
+    override_size: Option<Size>,
+    in_loop: bool,
+}
+
+fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
     match op {
-        FunctionOrOp::Function { modifier, code } => {
-            let mut dipped = None;
+        FunctionOrOp::DyadicModifierFunction {
+            modifier,
+            code_a,
+            code_b,
+        } => match modifier {
+            DyadicModifier::Repeat => match &code_b[..] {
+                &[FunctionOrOp::Op(Op::Value(value))] => {
+                    for _ in 0..value as u32 {
+                        for op in &code_a {
+                            handle_op(
+                                op.clone(),
+                                dag,
+                                ActiveModifiers {
+                                    in_loop: true,
+                                    ..modifiers
+                                },
+                            );
+                        }
+                    }
+                }
+                other => panic!("{:?}", other),
+            },
+        },
+        FunctionOrOp::MonadicModifierFunction { modifier, code } => {
+            let mut dipped = vec![];
             let mut reducing = None;
 
             match modifier {
-                Modifier::Back => {
+                MonadicModifier::Back => {
                     let x = dag.stack.pop().unwrap();
                     let y = dag.stack.pop().unwrap();
                     dag.stack.push(x);
                     dag.stack.push(y);
                 }
-                Modifier::Dip => {
-                    dipped = Some(dag.stack.pop().unwrap());
+                MonadicModifier::Dip => {
+                    dipped.push(dag.stack.pop().unwrap());
                 }
-                Modifier::On => {
-                    dipped = Some(*dag.stack.last().unwrap());
+                MonadicModifier::On => {
+                    dipped.push(*dag.stack.last().unwrap());
                 }
-                Modifier::By => {
+                MonadicModifier::By => {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
                     match stack_delta {
                         1..=i32::MAX => {}
@@ -105,15 +137,15 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                         }
                     }
                 }
-                Modifier::Gap => {
+                MonadicModifier::Gap => {
                     dag.stack.pop().unwrap();
                 }
-                Modifier::Table => {
+                MonadicModifier::Table => {
                     let x = dag.stack.last().unwrap();
                     let y = dag.stack.get(dag.stack.len() - 2).unwrap();
-                    override_size = Some(Size::TransposeSizeOf(*x, *y));
+                    modifiers.override_size = Some(Size::TransposeSizeOf(*x, *y));
                 }
-                Modifier::Reduce => {
+                MonadicModifier::Reduce => {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
                     assert_eq!(stack_delta, -1);
                     let reducing_array = *dag.stack.last().unwrap();
@@ -124,19 +156,33 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                             op: NodeOp::ReduceResult,
                             size: Size::Scalar,
                             is_string: false,
+                            in_loop: modifiers.in_loop,
                         },
                         vec![],
                     );
-                    override_size = Some(reducing_array_size);
+                    modifiers.override_size = Some(reducing_array_size);
                 }
-                Modifier::Rows => {
+                MonadicModifier::Rows => {
                     let x = *dag.stack.last().unwrap();
-                    override_size = Some(dag.inner[x].size);
+                    modifiers.override_size = Some(dag.inner[x].size);
+                }
+                MonadicModifier::Below => {
+                    let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
+                    match stack_delta {
+                        0..=i32::MAX => panic!(),
+                        _ => {
+                            for i in
+                                (dag.stack.len() as i32 + stack_delta - 1) as usize..dag.stack.len()
+                            {
+                                dag.stack.push(*dag.stack.get(i).unwrap());
+                            }
+                        }
+                    }
                 }
             }
 
             for op in code {
-                handle_op(op, dag, override_size);
+                handle_op(op, dag, modifiers.clone());
             }
 
             if let Some(reducing) = reducing {
@@ -146,20 +192,22 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                         op: NodeOp::Reduce(reducing),
                         size: Size::Scalar,
                         is_string: false,
+                        in_loop: modifiers.in_loop,
                     },
                     vec![parent],
                 );
             }
 
-            if let Some(value) = dipped {
+            for value in dipped {
                 dag.push(value);
             }
         }
         FunctionOrOp::Op(Op::Char(char)) => dag.insert_node(
             Node {
                 op: NodeOp::Value((char as u32 as f32).into()),
-                size: override_size.unwrap_or(Size::Scalar),
+                size: modifiers.override_size.unwrap_or(Size::Scalar),
                 is_string: true,
+                in_loop: modifiers.in_loop,
             },
             vec![],
         ),
@@ -169,6 +217,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     op: NodeOp::CreateArray(ArrayContents::Chars(string.chars().collect())),
                     size: Size::Known([string.len() as _, 1, 1, 1]),
                     is_string: true,
+                    in_loop: modifiers.in_loop,
                 },
                 vec![],
             );
@@ -181,6 +230,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     op: NodeOp::CreateArray(ArrayContents::Stack(items.clone())),
                     size: Size::Known([items.len() as _, 1, 1, 1]),
                     is_string: false,
+                    in_loop: modifiers.in_loop,
                 },
                 items,
             );
@@ -191,16 +241,18 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
         FunctionOrOp::Op(Op::Rand) => dag.insert_node(
             Node {
                 op: NodeOp::Rand,
-                size: override_size.unwrap_or(Size::Scalar),
+                size: modifiers.override_size.unwrap_or(Size::Scalar),
                 is_string: false,
+                in_loop: modifiers.in_loop,
             },
             vec![],
         ),
         FunctionOrOp::Op(Op::Value(value)) => dag.insert_node(
             Node {
                 op: NodeOp::Value(value.into()),
-                size: override_size.unwrap_or(Size::Scalar),
+                size: modifiers.override_size.unwrap_or(Size::Scalar),
                 is_string: false,
+                in_loop: modifiers.in_loop,
             },
             vec![],
         ),
@@ -228,7 +280,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 .map(|(_, index)| index)
                 .collect();
             let mut node = dag.inner[index].clone();
-            node.size = override_size.unwrap_or(node.size);
+            node.size = modifiers.override_size.unwrap_or(node.size);
             dag.insert_node(node, parents);
         }
         FunctionOrOp::Op(Op::Len) => {
@@ -238,6 +290,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     op: NodeOp::Len,
                     size: Size::Scalar,
                     is_string: false,
+                    in_loop: modifiers.in_loop,
                 },
                 vec![parent_index],
             );
@@ -249,6 +302,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     op: NodeOp::Range,
                     size: Size::RangeOf(parent_index),
                     is_string: false,
+                    in_loop: modifiers.in_loop,
                 },
                 vec![parent_index],
             );
@@ -261,6 +315,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     op: NodeOp::Drop,
                     size: Size::Drop { array, num },
                     is_string: dag.inner[array].is_string,
+                    in_loop: modifiers.in_loop,
                 },
                 vec![num, array],
             );
@@ -273,6 +328,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     op: NodeOp::Rev,
                     size,
                     is_string: dag.inner[index].is_string,
+                    in_loop: modifiers.in_loop,
                 },
                 vec![index],
             );
@@ -283,8 +339,9 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
             dag.insert_node(
                 Node {
                     op: NodeOp::Monadic(op),
-                    size: override_size.unwrap_or(size),
+                    size: modifiers.override_size.unwrap_or(size),
                     is_string: false,
+                    in_loop: modifiers.in_loop,
                 },
                 vec![index],
             );
@@ -296,11 +353,12 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
             let y_val = &dag.inner[y];
             let node = Node {
                 op: NodeOp::Dyadic {
-                    is_table: matches!(override_size, Some(Size::TransposeSizeOf(_, _))),
+                    is_table: matches!(modifiers.override_size, Some(Size::TransposeSizeOf(_, _))),
                     op,
                 },
                 is_string: x_val.is_string && y_val.is_string,
-                size: if let Some(size) = override_size {
+                in_loop: modifiers.in_loop,
+                size: if let Some(size) = modifiers.override_size {
                     size
                 } else {
                     match (x_val.size, y_val.size) {
@@ -336,7 +394,7 @@ pub fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<
     let mut dag = Dag::default();
 
     for op in code {
-        handle_op(op, &mut dag, None);
+        handle_op(op, &mut dag, Default::default());
     }
 
     (dag.inner, dag.stack)

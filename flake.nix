@@ -43,6 +43,8 @@
           mkShell rec {
             nativeBuildInputs = [
               pkg-config
+              linuxPackages_latest.perf
+                            hotspot
             ];
             buildInputs = [
               udev

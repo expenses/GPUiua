@@ -34,7 +34,12 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     {
         let mut walk_stack = final_stack.clone();
+        let mut touched = HashSet::new();
         while let Some(index) = walk_stack.pop() {
+            if touched.contains(&index) {
+                continue;
+            }
+            touched.insert(index);
             for (_, parent) in dag.parents(index).iter(&dag) {
                 walk_stack.push(parent);
             }
@@ -62,7 +67,8 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 | Node {
                     op: NodeOp::Reduce(_),
                     ..
-                } => {
+                }
+                | Node { in_loop: true, .. } => {
                     full_eval_to
                         .entry(index)
                         .or_insert_with(|| (dummy_buffer_index, vec![]));
@@ -233,7 +239,7 @@ struct ShaderModule {
     final_stack_data: Vec<bool>,
 }
 
-use std::collections::{BTreeMap, HashMap, btree_map::Entry};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 
 use rand::SeedableRng;
 

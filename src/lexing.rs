@@ -83,6 +83,10 @@ pub enum Token<'source> {
     Len,
     #[regex(r"/")]
     Reduce,
+    #[regex(r"repeat|⍥")]
+    Repeat,
+    #[regex(r"below|◡")]
+    Below,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -132,9 +136,14 @@ pub enum StackOp {
 #[derive(Clone, Debug)]
 pub enum FunctionOrOp<'a> {
     Op(Op<'a>),
-    Function {
-        modifier: Modifier,
+    MonadicModifierFunction {
+        modifier: MonadicModifier,
         code: Vec<FunctionOrOp<'a>>,
+    },
+    DyadicModifierFunction {
+        modifier: DyadicModifier,
+        code_a: Vec<FunctionOrOp<'a>>,
+        code_b: Vec<FunctionOrOp<'a>>,
     },
 }
 
@@ -154,19 +163,29 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::EndArray) => 0,
             // Tricky
             Self::Op(Op::StartArray) => 0,
-            Self::Function { modifier, code } => {
+            Self::MonadicModifierFunction { modifier, code } => {
+                let stack_delta = code.iter().map(|op| op.stack_delta()).sum::<i32>();
+
                 let modifier = match *modifier {
-                    Modifier::Back => 0,
-                    Modifier::Dip => 0,
-                    Modifier::Table => 0,
-                    Modifier::Gap => -1,
-                    Modifier::By => 1,
-                    Modifier::Reduce => 1,
-                    Modifier::On => 1,
-                    Modifier::Rows => 0,
+                    MonadicModifier::Back => 0,
+                    MonadicModifier::Dip => 0,
+                    MonadicModifier::Table => 0,
+                    MonadicModifier::Gap => -1,
+                    MonadicModifier::By => 1,
+                    MonadicModifier::Reduce => 1,
+                    MonadicModifier::On => 1,
+                    MonadicModifier::Rows => 0,
+                    MonadicModifier::Below => return 1,
                 };
 
-                modifier + code.iter().map(|op| op.stack_delta()).sum::<i32>()
+                modifier + stack_delta
+            }
+            Self::DyadicModifierFunction {
+                modifier,
+                code_a,
+                code_b,
+            } => {
+                todo!()
             }
         }
     }
@@ -190,7 +209,12 @@ pub enum Op<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Modifier {
+pub enum DyadicModifier {
+    Repeat,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MonadicModifier {
     Table,
     Back,
     Gap,
@@ -199,10 +223,12 @@ pub enum Modifier {
     Reduce,
     On,
     Rows,
+    Below,
 }
 
 pub enum TokenType<'a> {
-    Modifier(Modifier),
+    MonadicModifier(MonadicModifier),
+    DyadicModifier(DyadicModifier),
     Op(Op<'a>),
     AssignedOp(&'a str),
 }
@@ -231,14 +257,16 @@ pub fn parse(token: Token) -> Option<TokenType> {
         Token::Dup => TokenType::Op(Op::Stack(StackOp::Dup)),
         Token::Pop => TokenType::Op(Op::Stack(StackOp::Pop)),
         Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
-        Token::By => TokenType::Modifier(Modifier::By),
-        Token::On => TokenType::Modifier(Modifier::On),
-        Token::Gap => TokenType::Modifier(Modifier::Gap),
-        Token::Dip => TokenType::Modifier(Modifier::Dip),
-        Token::Back => TokenType::Modifier(Modifier::Back),
-        Token::Table => TokenType::Modifier(Modifier::Table),
-        Token::Reduce => TokenType::Modifier(Modifier::Reduce),
-        Token::Rows => TokenType::Modifier(Modifier::Rows),
+        Token::By => TokenType::MonadicModifier(MonadicModifier::By),
+        Token::On => TokenType::MonadicModifier(MonadicModifier::On),
+        Token::Gap => TokenType::MonadicModifier(MonadicModifier::Gap),
+        Token::Dip => TokenType::MonadicModifier(MonadicModifier::Dip),
+        Token::Back => TokenType::MonadicModifier(MonadicModifier::Back),
+        Token::Table => TokenType::MonadicModifier(MonadicModifier::Table),
+        Token::Reduce => TokenType::MonadicModifier(MonadicModifier::Reduce),
+        Token::Rows => TokenType::MonadicModifier(MonadicModifier::Rows),
+        Token::Below => TokenType::MonadicModifier(MonadicModifier::Below),
+        Token::Repeat => TokenType::DyadicModifier(DyadicModifier::Repeat),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
