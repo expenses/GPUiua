@@ -97,9 +97,10 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                     let value = value as u32;
                     let mut loops = value;
                     let stack_delta = code_a.iter().map(|code| code.stack_delta()).sum::<i32>();
+                    let stack_usage = code_a.iter().map(|code| code.stack_usage()).sum::<u32>();
 
                     if stack_delta > 0 {
-                        loops -= (stack_delta + 1) as u32;
+                        loops -= stack_usage;
                     }
 
                     for _ in 0..loops {

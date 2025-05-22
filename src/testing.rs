@@ -385,6 +385,17 @@ fn fibonacci() {
 }
 
 #[test]
+fn floor_repeat_rand() {
+    assert_output(
+        "floor*10 repeat rand 5",
+        vec![ReadBackValue {
+            size: [5, 1, 1, 1],
+            values: vec![7.0, 9.0, 6.0, 7.0, 0.0],
+        }],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

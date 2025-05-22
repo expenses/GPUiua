@@ -148,7 +148,6 @@ pub enum FunctionOrOp<'a> {
 }
 
 impl<'a> FunctionOrOp<'a> {
-    #[allow(unused)]
     pub fn stack_delta(&self) -> i32 {
         match self {
             Self::Op(Op::Monadic(_)) => 0,
@@ -179,6 +178,47 @@ impl<'a> FunctionOrOp<'a> {
                 };
 
                 modifier + stack_delta
+            }
+            Self::DyadicModifierFunction {
+                modifier,
+                code_a,
+                code_b,
+            } => {
+                todo!()
+            }
+        }
+    }
+
+    pub fn stack_usage(&self) -> u32 {
+        match self {
+            Self::Op(Op::Monadic(_)) => 1,
+            Self::Op(Op::Drop) => 2,
+            Self::Op(Op::Dyadic(_)) => 2,
+            Self::Op(Op::Value(_)) | Self::Op(Op::String(_)) | Self::Op(Op::Char(_)) => 0,
+            Self::Op(Op::Rand) => 0,
+            Self::Op(Op::Stack(StackOp::Dup)) => 0,
+            Self::Op(Op::Stack(StackOp::Ident)) => 0,
+            Self::Op(Op::Stack(StackOp::Pop)) => 1,
+            Self::Op(Op::Len | Op::Rev | Op::Range) => 1,
+            Self::Op(Op::EndArray) => 0,
+            // Tricky
+            Self::Op(Op::StartArray) => 0,
+            Self::MonadicModifierFunction { modifier, code } => {
+                let stack_usage = code.iter().map(|op| op.stack_usage()).sum::<u32>();
+
+                let modifier = match *modifier {
+                    MonadicModifier::Back => 0,
+                    MonadicModifier::Dip => 0,
+                    MonadicModifier::Table => 0,
+                    MonadicModifier::Gap => 1,
+                    MonadicModifier::By => 0,
+                    MonadicModifier::Reduce => 0,
+                    MonadicModifier::On => 0,
+                    MonadicModifier::Rows => 0,
+                    MonadicModifier::Below => 0,
+                };
+
+                modifier + stack_usage
             }
             Self::DyadicModifierFunction {
                 modifier,
