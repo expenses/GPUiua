@@ -16,6 +16,7 @@ pub enum NodeOp {
     Rev,
     Rand,
     Len,
+    Drop,
     Value(ordered_float::OrderedFloat<f32>),
     ReduceResult,
     Reduce(daggy::NodeIndex),
@@ -36,6 +37,10 @@ pub enum Size {
     RangeOf(daggy::NodeIndex),
     MaxOf(daggy::NodeIndex, daggy::NodeIndex),
     TransposeSizeOf(daggy::NodeIndex, daggy::NodeIndex),
+    Drop {
+        array: daggy::NodeIndex,
+        num: daggy::NodeIndex,
+    },
 }
 
 #[derive(Default)]
@@ -248,6 +253,18 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 vec![parent_index],
             );
         }
+        FunctionOrOp::Op(Op::Drop) => {
+            let num = dag.stack.pop().unwrap();
+            let array = dag.stack.pop().unwrap();
+            dag.insert_node(
+                Node {
+                    op: NodeOp::Drop,
+                    size: Size::Drop { array, num },
+                    is_string: false,
+                },
+                vec![num, array],
+            );
+        }
         FunctionOrOp::Op(Op::Rev) => {
             let index = dag.stack.pop().unwrap();
             let size = dag.inner[index].size;
@@ -282,13 +299,11 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                     is_table: matches!(override_size, Some(Size::TransposeSizeOf(_, _))),
                     op,
                 },
-                is_string: false,
+                is_string: x_val.is_string && y_val.is_string,
                 size: if let Some(size) = override_size {
                     size
                 } else {
                     match (x_val.size, y_val.size) {
-                        (Size::Scalar, Size::Scalar) => Size::Scalar,
-                        (Size::Known(size), Size::Scalar) => Size::Known(size),
                         (Size::Known(x), Size::Known(y)) => Size::Known([
                             x[0].max(y[0]),
                             x[1].max(y[1]),

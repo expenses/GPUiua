@@ -271,6 +271,80 @@ fn rows_rand() {
 }
 
 #[test]
+fn strings_and_chars() {
+    assert_output(
+        "ne@ \"hi :)\"",
+        vec![ReadBackValue {
+            size: [5, 1, 1, 1],
+            values: vec![1.0, 1.0, 0.0, 1.0, 1.0],
+        }],
+    );
+}
+
+#[test]
+fn string_example() {
+    assert_output(
+        "
+            \"Unabashedly I utilize arrays\"
+            ⊸≠@  # Mask of non-spaces
+            # ⊜⊢   # All first letters
+            ⊙◌
+        ",
+        vec![ReadBackValue {
+            size: [28, 1, 1, 1],
+            values: vec![
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            ],
+        }],
+    );
+}
+
+#[test]
+fn drop_1d() {
+    assert_output("drop 2 [1.5 2.5 3.5]", vec![ReadBackValue::scalar(3.5)]);
+}
+
+#[test]
+fn drop_2d() {
+    assert_output(
+        "drop 2 table max . range 5",
+        vec![ReadBackValue {
+            size: [3, 5, 1, 1],
+            #[rustfmt::skip]
+            values: vec![
+                2.0, 3.0, 4.0,
+                2.0, 3.0, 4.0,
+                2.0, 3.0, 4.0,
+                3.0, 3.0, 4.0,
+                4.0, 4.0, 4.0
+            ],
+        }],
+    );
+}
+
+#[test]
+fn double_drop_add() {
+    assert_output(
+        "+drop 1 drop 1 .. table max .. range 3",
+        vec![
+            ReadBackValue {
+                size: [3, 1, 1, 1],
+                values: vec![0.0, 1.0, 2.0],
+            },
+            ReadBackValue {
+                size: [3, 3, 1, 1],
+                values: vec![0.0, 1.0, 2.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+            },
+            ReadBackValue {
+                size: [3, 3, 1, 1],
+                values: vec![2.0, 3.0, 4.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            },
+        ],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

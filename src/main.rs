@@ -15,11 +15,16 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
     let (dag, final_stack) = parse_code_to_dag(code);
-    let mut full_eval_to: BTreeMap<daggy::NodeIndex, usize> = final_stack
-        .iter()
-        .enumerate()
-        .map(|(i, &index)| (index, i))
-        .collect();
+    let mut full_eval_to: BTreeMap<daggy::NodeIndex, (usize, Vec<usize>)> = BTreeMap::new();
+    for (i, &index) in final_stack.iter().enumerate() {
+        match full_eval_to.entry(index) {
+            Entry::Occupied(mut occupied) => occupied.get_mut().1.push(i),
+            Entry::Vacant(vacancy) => {
+                vacancy.insert((i, vec![]));
+            }
+        }
+    }
+
     let mut size_to_buffer: HashMap<Size, usize> = final_stack
         .iter()
         .enumerate()
@@ -42,7 +47,9 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     ..
                 } => {
                     for (_, index) in dag.parents(index).iter(&dag) {
-                        full_eval_to.insert(index, dummy_buffer_index);
+                        full_eval_to
+                            .entry(index)
+                            .or_insert_with(|| (dummy_buffer_index, vec![]));
                         size_to_buffer.insert(node.size, dummy_buffer_index);
                         dummy_buffer_index += 1;
                     }
@@ -56,7 +63,9 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     op: NodeOp::Reduce(_),
                     ..
                 } => {
-                    full_eval_to.insert(index, dummy_buffer_index);
+                    full_eval_to
+                        .entry(index)
+                        .or_insert_with(|| (dummy_buffer_index, vec![]));
                     size_to_buffer.insert(node.size, dummy_buffer_index);
                     dummy_buffer_index += 1;
                 }
@@ -78,7 +87,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
 
     let mut node_to_allocation = HashMap::new();
 
-    for (&item, &i) in &full_eval_to {
+    for (&item, (i, copies)) in &full_eval_to {
         let size = evaluate_size(
             &mut EvaluationContext {
                 dag: &dag,
@@ -93,6 +102,11 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         code_builder.functions[0]
             .admin_lines
             .push(format!("allocate({}, {})", i, size));
+        for copy in copies {
+            code_builder.functions[0]
+                .admin_lines
+                .push(format!("buffers[{}] = buffers[{}]", copy, i));
+        }
         node_to_allocation.insert(item, i);
 
         match &dag[item].size {
@@ -133,7 +147,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                         dispatch_index
                     });
 
-                code_builder.functions[dispatch_index].dispatching_on_buffer_index = Some(i);
+                code_builder.functions[dispatch_index].dispatching_on_buffer_index = Some(*i);
 
                 code_builder.functions[dispatch_index]
                     .work_lines
@@ -155,16 +169,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     ));
             }
         }
-    }
-
-    for (i, item) in final_stack.iter().enumerate() {
-        let allocation = node_to_allocation[item];
-        if i == allocation {
-            continue;
-        }
-        code_builder.functions[0]
-            .admin_lines
-            .push(format!("buffers[{}] = buffers[{}]", i, allocation));
     }
 
     let mut shader = include_str!("../out.wgsl").to_string();
@@ -229,14 +233,14 @@ struct ShaderModule {
     final_stack_data: Vec<bool>,
 }
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 
 use rand::SeedableRng;
 
 struct EvaluationContext<'a, R> {
     dag: &'a daggy::Dag<graph_generation::Node, ()>,
     functions: &'a mut AuxFunctions,
-    full_eval_to: &'a BTreeMap<daggy::NodeIndex, usize>,
+    full_eval_to: &'a BTreeMap<daggy::NodeIndex, (usize, Vec<usize>)>,
     size_to_buffer: &'a HashMap<Size, usize>,
     rng: &'a mut R,
 }
@@ -247,7 +251,7 @@ fn evaluate_scalar<R: Rng>(
     index: daggy::NodeIndex,
 ) -> String {
     if !top_level_eval {
-        if let Some(buffer_index) = context.full_eval_to.get(&index) {
+        if let Some((buffer_index, _)) = context.full_eval_to.get(&index) {
             return if context.dag[index].size == Size::Scalar {
                 format!("read_buffer({}, Coord(0,0,0,0))", buffer_index)
             } else {
@@ -257,6 +261,26 @@ fn evaluate_scalar<R: Rng>(
     }
 
     match &context.dag[index].op {
+        NodeOp::Drop => {
+            let mut parents = context.dag.parents(index).iter(context.dag);
+            let array = evaluate_scalar(context, false, parents.next().unwrap().1);
+            let num = evaluate_scalar(context, false, parents.next().unwrap().1);
+
+            context.functions.insert(
+                index,
+                format!(
+                    "fn drop_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
+                    index.index(),
+                    array
+                ),
+            );
+
+            format!(
+                "drop_{}(coord_plus_x(thread_coord, {}), dispatch_size)",
+                index.index(),
+                num
+            )
+        }
         NodeOp::CreateArray(items) => {
             let size = match context.dag[index].size {
                 Size::Known([x, 1, 1, 1]) => x,
@@ -420,6 +444,13 @@ fn evaluate_size<R: Rng>(
     }
 
     match &context.dag[index].size {
+        Size::Drop { array, num } => {
+            format!(
+                "coord_plus_x({}, -{})",
+                evaluate_size(context, false, *array),
+                evaluate_scalar(context, false, *num)
+            )
+        }
         Size::RangeOf(range) => {
             format!(
                 "Coord(u32({}), 1, 1, 1)",

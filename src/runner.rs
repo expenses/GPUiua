@@ -235,24 +235,31 @@ impl Runner {
         let mut output = String::new();
 
         for (value, &is_string) in values.iter().zip(&module.final_stack_data) {
+            let print = |output: &mut String, slice: &[f32]| {
+                if is_string {
+                    let chars: String = slice.iter().map(|&val| val as u8 as char).collect();
+                    output.push_str(&format!("{:?}\n", chars));
+                } else {
+                    output.push_str(&format!("{:?}\n", slice))
+                }
+            };
+
             match value.size {
+                [0, 0, 0, 0] => {
+                    println!("empty")
+                }
                 [1, 1, 1, 1] => output.push_str(&format!("{}\n", value.values[0])),
                 [_, 1, 1, 1] => {
-                    if is_string {
-                        let chars: String =
-                            value.values.iter().map(|&val| val as u8 as char).collect();
-                        output.push_str(&format!("{:?}", chars));
-                    } else {
-                        output.push_str(&format!("{:?}\n", value.values))
-                    }
+                    print(&mut output, &value.values);
                 }
                 [x, _, 1, 1] => {
+                    output.push('\n');
                     for chunk in value.values.chunks(x as usize) {
-                        output.push_str(&format!("{:?}\n", chunk));
+                        print(&mut output, chunk);
                     }
                     output.push('\n');
                 }
-                _ => panic!(),
+                other => panic!("{:?}", other),
             }
         }
 

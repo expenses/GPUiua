@@ -113,6 +113,15 @@ fn coord_transpose(coord: Coord) -> Coord {
     );
 }
 
+fn coord_plus_x(coord: Coord, x: f32) -> Coord {
+    return Coord(
+        u32(f32(coord[0]) + x),
+        coord[1],
+        coord[2],
+        coord[3]
+    );
+}
+
 fn write_to_buffer(buffer_index: u32, coord: Coord, value: f32) {
     let buffer = buffers[buffer_index];
     if (coord_any_ge(coord, buffer.size)) {

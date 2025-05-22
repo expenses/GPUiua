@@ -1,4 +1,4 @@
-use crate::lexing::{DyadicOp, FunctionOrOp, Modifier, MonadicOp, Op, StackOp, Token};
+use crate::lexing::{FunctionOrOp, Op, Token, TokenType, parse};
 use logos::Logos;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -128,58 +128,4 @@ fn parse_code_blocks_inner<'a>(
             _ => Err(span),
         },
     }
-}
-
-enum TokenType<'a> {
-    Modifier(Modifier),
-    Op(Op<'a>),
-    AssignedOp(&'a str),
-}
-
-fn parse(token: Token) -> Option<TokenType> {
-    Some(match token {
-        Token::Abs => TokenType::Op(Op::Monadic(MonadicOp::Abs)),
-        Token::Not => TokenType::Op(Op::Monadic(MonadicOp::Not)),
-        Token::Neg => TokenType::Op(Op::Monadic(MonadicOp::Neg)),
-        Token::Sin => TokenType::Op(Op::Monadic(MonadicOp::Sin)),
-        Token::Ceil => TokenType::Op(Op::Monadic(MonadicOp::Ceil)),
-        Token::Round => TokenType::Op(Op::Monadic(MonadicOp::Round)),
-        Token::Floor => TokenType::Op(Op::Monadic(MonadicOp::Floor)),
-        Token::Gt => TokenType::Op(Op::Dyadic(DyadicOp::Gt)),
-        Token::Ge => TokenType::Op(Op::Dyadic(DyadicOp::Ge)),
-        Token::Lt => TokenType::Op(Op::Dyadic(DyadicOp::Lt)),
-        Token::Le => TokenType::Op(Op::Dyadic(DyadicOp::Le)),
-        Token::Ne => TokenType::Op(Op::Dyadic(DyadicOp::Ne)),
-        Token::Eq | Token::EqualSign => TokenType::Op(Op::Dyadic(DyadicOp::Eq)),
-        Token::Add => TokenType::Op(Op::Dyadic(DyadicOp::Add)),
-        Token::Mul => TokenType::Op(Op::Dyadic(DyadicOp::Mul)),
-        Token::Div => TokenType::Op(Op::Dyadic(DyadicOp::Div)),
-        Token::Max => TokenType::Op(Op::Dyadic(DyadicOp::Max)),
-        Token::Sub => TokenType::Op(Op::Dyadic(DyadicOp::Sub)),
-        Token::Sqrt => TokenType::Op(Op::Monadic(MonadicOp::Sqrt)),
-        Token::Dup => TokenType::Op(Op::Stack(StackOp::Dup)),
-        Token::Pop => TokenType::Op(Op::Stack(StackOp::Pop)),
-        Token::Ident => TokenType::Op(Op::Stack(StackOp::Ident)),
-        Token::By => TokenType::Modifier(Modifier::By),
-        Token::On => TokenType::Modifier(Modifier::On),
-        Token::Gap => TokenType::Modifier(Modifier::Gap),
-        Token::Dip => TokenType::Modifier(Modifier::Dip),
-        Token::Back => TokenType::Modifier(Modifier::Back),
-        Token::Table => TokenType::Modifier(Modifier::Table),
-        Token::Reduce => TokenType::Modifier(Modifier::Reduce),
-        Token::Rows => TokenType::Modifier(Modifier::Rows),
-        Token::Rev => TokenType::Op(Op::Rev),
-        Token::Rand => TokenType::Op(Op::Rand),
-        Token::Range => TokenType::Op(Op::Range),
-        Token::Len => TokenType::Op(Op::Len),
-        Token::Value(value) => TokenType::Op(Op::Value(value)),
-        Token::String(string) => TokenType::Op(Op::String(string)),
-        Token::Char(char) => TokenType::Op(Op::Char(char)),
-        Token::AssignedName(string) => TokenType::AssignedOp(string),
-        Token::OpenParen
-        | Token::CloseParen
-        | Token::ArrayLeft
-        | Token::ArrayRight
-        | Token::Assignment => return None,
-    })
 }
