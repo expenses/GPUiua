@@ -345,6 +345,23 @@ fn double_drop_add() {
 }
 
 #[test]
+fn dip_rev() {
+    assert_output(
+        "dip rev drop 2 . range 3",
+        vec![
+            ReadBackValue {
+                size: [3, 1, 1, 1],
+                values: vec![2.0, 1.0, 0.0],
+            },
+            ReadBackValue {
+                size: [1, 1, 1, 1],
+                values: vec![2.0],
+            },
+        ],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

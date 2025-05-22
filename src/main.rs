@@ -437,11 +437,12 @@ fn evaluate_size<R: Rng>(
     top_level_eval: bool,
     index: daggy::NodeIndex,
 ) -> String {
-    if !top_level_eval {
-        if let Some(buffer_index) = context.size_to_buffer.get(&context.dag[index].size) {
-            return format!("buffers[{}].size", buffer_index);
-        }
-    }
+    // Currently disabled because buffer allocation and copy ordering is not quite correct (dip_rev test).
+    //if !top_level_eval {
+    //    if let Some(buffer_index) = context.size_to_buffer.get(&context.dag[index].size) {
+    //        return format!("buffers[{}].size", buffer_index);
+    //    }
+    //}
 
     match &context.dag[index].size {
         Size::Drop { array, num } => {

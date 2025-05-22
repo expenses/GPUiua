@@ -260,7 +260,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut override_size: Option<Size>) {
                 Node {
                     op: NodeOp::Drop,
                     size: Size::Drop { array, num },
-                    is_string: false,
+                    is_string: dag.inner[array].is_string,
                 },
                 vec![num, array],
             );
