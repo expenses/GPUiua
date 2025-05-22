@@ -1,4 +1,3 @@
-use daggy::Walker;
 use rand::Rng;
 
 mod graph_generation;
@@ -15,7 +14,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
     let (dag, final_stack) = parse_code_to_dag(code);
-    let mut full_eval_to: BTreeMap<daggy::NodeIndex, (usize, Vec<usize>)> = BTreeMap::new();
+    let mut full_eval_to: BTreeMap<usize, (usize, Vec<usize>)> = BTreeMap::new();
     for (i, &index) in final_stack.iter().enumerate() {
         match full_eval_to.entry(index) {
             Entry::Occupied(mut occupied) => occupied.get_mut().1.push(i),
@@ -28,7 +27,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
     let mut size_to_buffer: HashMap<Size, usize> = final_stack
         .iter()
         .enumerate()
-        .map(|(i, &index)| (dag[index].size, i))
+        .map(|(i, &index)| (dag[index].0.size, i))
         .collect();
     let mut dummy_buffer_index = final_stack.len();
 
@@ -40,18 +39,18 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 continue;
             }
             touched.insert(index);
-            for (_, parent) in dag.parents(index).iter(&dag) {
+            for &parent in &dag[index].1 {
                 walk_stack.push(parent);
             }
 
-            let node = &dag[index];
+            let node = &dag[index].0;
             match node {
                 Node {
                     op: NodeOp::Dyadic { .. },
                     size: Size::MaxOf(_, _),
                     ..
                 } => {
-                    for (_, index) in dag.parents(index).iter(&dag) {
+                    for &index in &dag[index].1 {
                         full_eval_to
                             .entry(index)
                             .or_insert_with(|| (dummy_buffer_index, vec![]));
@@ -115,7 +114,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         }
         node_to_allocation.insert(item, i);
 
-        match &dag[item].size {
+        match &dag[item].0.size {
             Size::Scalar => {
                 code_builder.functions[0]
                     .admin_lines
@@ -140,7 +139,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
             _ => {
                 let dispatch_index = *code_builder
                     .size_to_function_index
-                    .entry(dag[item].size)
+                    .entry(dag[item].0.size)
                     .or_insert_with(|| {
                         let dispatch_index = code_builder.next_dispatch_index;
                         code_builder.next_dispatch_index += 1;
@@ -148,12 +147,12 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                         code_builder.functions[dispatch_index]
                             .admin_lines
                             .push(format!("dispatch_for_buffer({})", i));
+                        code_builder.functions[dispatch_index].dispatching_on_buffer_index =
+                            Some(*i);
 
                         code_builder.functions.push(Default::default());
                         dispatch_index
                     });
-
-                code_builder.functions[dispatch_index].dispatching_on_buffer_index = Some(*i);
 
                 code_builder.functions[dispatch_index]
                     .work_lines
@@ -228,7 +227,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         num_functions: step_index,
         final_stack_data: final_stack
             .iter()
-            .map(|index| dag[*index].is_string)
+            .map(|index| dag[*index].0.is_string)
             .collect(),
     }
 }
@@ -244,9 +243,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use rand::SeedableRng;
 
 struct EvaluationContext<'a, R> {
-    dag: &'a daggy::Dag<graph_generation::Node, ()>,
+    dag: &'a Vec<(Node, Vec<usize>)>,
     functions: &'a mut AuxFunctions,
-    full_eval_to: &'a BTreeMap<daggy::NodeIndex, (usize, Vec<usize>)>,
+    full_eval_to: &'a BTreeMap<usize, (usize, Vec<usize>)>,
     size_to_buffer: &'a HashMap<Size, usize>,
     rng: &'a mut R,
 }
@@ -254,11 +253,11 @@ struct EvaluationContext<'a, R> {
 fn evaluate_scalar<R: Rng>(
     context: &mut EvaluationContext<R>,
     top_level_eval: bool,
-    index: daggy::NodeIndex,
+    index: usize,
 ) -> String {
     if !top_level_eval {
         if let Some((buffer_index, _)) = context.full_eval_to.get(&index) {
-            return if context.dag[index].size == Size::Scalar {
+            return if context.dag[index].0.size == Size::Scalar {
                 format!("read_buffer({}, Coord(0,0,0,0))", buffer_index)
             } else {
                 format!("read_buffer({}, thread_coord)", buffer_index)
@@ -266,29 +265,27 @@ fn evaluate_scalar<R: Rng>(
         }
     }
 
-    match &context.dag[index].op {
+    match &context.dag[index].0.op {
         NodeOp::Drop => {
-            let mut parents = context.dag.parents(index).iter(context.dag);
-            let array = evaluate_scalar(context, false, parents.next().unwrap().1);
-            let num = evaluate_scalar(context, false, parents.next().unwrap().1);
+            let parents = &context.dag[index].1;
+            let array = evaluate_scalar(context, false, parents[0]);
+            let num = evaluate_scalar(context, false, parents[1]);
 
             context.functions.insert(
                 index,
                 format!(
                     "fn drop_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
-                    index.index(),
-                    array
+                    index, array
                 ),
             );
 
             format!(
                 "drop_{}(coord_plus_x(thread_coord, {}), dispatch_size)",
-                index.index(),
-                num
+                index, num
             )
         }
         NodeOp::CreateArray(items) => {
-            let size = match context.dag[index].size {
+            let size = match context.dag[index].0.size {
                 Size::Known([x, 1, 1, 1]) => x,
                 Size::Scalar => 1,
                 _ => unreachable!(),
@@ -315,12 +312,10 @@ fn evaluate_scalar<R: Rng>(
                         let array_{0} = array<f32, {1}>({2});
                         return array_{0}[index];
                     }}",
-                        index.index(),
-                        size,
-                        children
+                        index, size, children
                     ),
                 );
-                format!("created_array_{}(thread_coord[0])", index.index())
+                format!("created_array_{}(thread_coord[0])", index)
             } else {
                 "0".to_string()
             }
@@ -339,66 +334,46 @@ fn evaluate_scalar<R: Rng>(
                     }}
                     return reduction;
                 }}",
-                index.index(),
+                index,
                 evaluate_size(context, false, *reducing),
                 evaluate_scalar(context, false, *reducing),
                 context.rng.random::<u32>(),
                 evaluate_scalar(
                     context,
                     false,
-                    context.dag.parents(index).iter(context.dag).next().unwrap().1
+                    context.dag[index].1[0]
                 )
             );
             context.functions.insert(index, function);
-            format!("reduce_{}()", index.index())
+            format!("reduce_{}()", index)
         }
         NodeOp::ReduceResult => "reduction".to_string(),
         NodeOp::Len => {
-            let size = evaluate_size(
-                context,
-                false,
-                context
-                    .dag
-                    .parents(index)
-                    .iter(context.dag)
-                    .next()
-                    .unwrap()
-                    .1,
-            );
+            let size = evaluate_size(context, false, context.dag[index].1[0]);
             format!("f32({}[0])", size)
         }
         NodeOp::Monadic(op) => format!(
             "{}({})",
             format!("{:?}", op).to_lowercase(),
-            evaluate_scalar(
-                context,
-                false,
-                context
-                    .dag
-                    .parents(index)
-                    .iter(context.dag)
-                    .next()
-                    .unwrap()
-                    .1
-            )
+            evaluate_scalar(context, false, context.dag[index].1[0],)
         ),
         NodeOp::Dyadic { op, is_table } => {
-            let mut parents = context.dag.parents(index).iter(context.dag);
-            let mut arg_0 = evaluate_scalar(context, false, parents.next().unwrap().1);
+            let parents = &context.dag[index].1;
+            let mut arg_0 = evaluate_scalar(context, false, parents[0]);
             let arg_1 = parents
-                .next()
-                .map(|parent| evaluate_scalar(context, false, parent.1))
+                .get(1)
+                .map(|&parent| evaluate_scalar(context, false, parent))
                 .unwrap_or_else(|| arg_0.clone());
 
             if *is_table {
                 context.functions.insert(index, format!(
                     "fn table_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
-                    index.index(),
+                    index,
                     arg_0
                 ));
                 arg_0 = format!(
                     "table_{}(coord_transpose(thread_coord), dispatch_size)",
-                    index.index()
+                    index
                 );
             }
 
@@ -413,35 +388,30 @@ fn evaluate_scalar<R: Rng>(
         NodeOp::Range => "f32(thread_coord[0])".to_string(),
         NodeOp::Rand => "random_uniform(random_seed)".to_string(),
         NodeOp::Rev => {
-            let function =
-                format!(
+            let function = format!(
                 "fn rev_{}(thread_coord: Coord, dispatch_size: Coord, thread: vec3<u32>) -> f32 {{
                     var random_seed = u32({}) + thread.x;
                     return {};
                 }}",
-                index.index(),
+                index,
                 context.rng.random::<u32>(),
-                evaluate_scalar(
-                    context,
-                    false,
-                    context.dag.parents(index).iter(context.dag).next().unwrap().1
-                )
+                evaluate_scalar(context, false, context.dag[index].1[0])
             );
             context.functions.insert(index, function);
             format!(
                 "rev_{}(coord_reverse(thread_coord, dispatch_size), dispatch_size, thread)",
-                index.index(),
+                index,
             )
         }
     }
 }
 
-type AuxFunctions = HashMap<daggy::NodeIndex, String>;
+type AuxFunctions = HashMap<usize, String>;
 
 fn evaluate_size<R: Rng>(
     context: &mut EvaluationContext<R>,
     top_level_eval: bool,
-    index: daggy::NodeIndex,
+    index: usize,
 ) -> String {
     // Currently disabled because buffer allocation and copy ordering is not quite correct (dip_rev test).
     //if !top_level_eval {
@@ -450,7 +420,7 @@ fn evaluate_size<R: Rng>(
     //    }
     //}
 
-    match &context.dag[index].size {
+    match &context.dag[index].0.size {
         Size::Drop { array, num } => {
             format!(
                 "coord_plus_x({}, -{})",

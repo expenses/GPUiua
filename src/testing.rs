@@ -396,6 +396,20 @@ fn floor_repeat_rand() {
 }
 
 #[test]
+fn repeat_table() {
+    assert_output(
+        "dip repeat(mul 2).8 table gap gap 1.range 3",
+        vec![
+            ReadBackValue {
+                size: [3, 3, 1, 1],
+                values: vec![256.0; 9],
+            },
+            ReadBackValue::scalar(8.0),
+        ],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

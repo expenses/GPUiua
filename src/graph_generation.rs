@@ -1,12 +1,11 @@
 use crate::lexing::{
     DyadicModifier, DyadicOp, FunctionOrOp, MonadicModifier, MonadicOp, Op, StackOp,
 };
-use daggy::Walker;
 use std::collections::HashMap;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum ArrayContents {
-    Stack(Vec<daggy::NodeIndex>),
+    Stack(Vec<usize>),
     Chars(Vec<char>),
 }
 
@@ -21,7 +20,7 @@ pub enum NodeOp {
     Drop,
     Value(ordered_float::OrderedFloat<f32>),
     ReduceResult,
-    Reduce(daggy::NodeIndex),
+    Reduce(usize),
     CreateArray(ArrayContents),
 }
 
@@ -37,25 +36,22 @@ pub struct Node {
 pub enum Size {
     Scalar,
     Known([u32; 4]),
-    RangeOf(daggy::NodeIndex),
-    MaxOf(daggy::NodeIndex, daggy::NodeIndex),
-    TransposeSizeOf(daggy::NodeIndex, daggy::NodeIndex),
-    Drop {
-        array: daggy::NodeIndex,
-        num: daggy::NodeIndex,
-    },
+    RangeOf(usize),
+    MaxOf(usize, usize),
+    TransposeSizeOf(usize, usize),
+    Drop { array: usize, num: usize },
 }
 
 #[derive(Default)]
 struct Dag {
-    inner: daggy::Dag<Node, ()>,
-    stack: Vec<daggy::NodeIndex>,
-    duplicate_map: HashMap<(Node, Vec<daggy::NodeIndex>), daggy::NodeIndex>,
+    dag: Vec<(Node, Vec<usize>)>,
+    stack: Vec<usize>,
+    duplicate_map: HashMap<(Node, Vec<usize>), usize>,
     pushes_since_array_began: Vec<usize>,
 }
 
 impl Dag {
-    fn push(&mut self, index: daggy::NodeIndex) {
+    fn push(&mut self, index: usize) {
         if let Some(count) = self.pushes_since_array_began.last_mut() {
             *count += 1;
         }
@@ -63,18 +59,23 @@ impl Dag {
         self.stack.push(index);
     }
 
-    fn insert_node(&mut self, node: Node, parent_indices: Vec<daggy::NodeIndex>) {
+    fn insert_node(&mut self, node: Node, mut parent_indices: Vec<usize>) {
+        parent_indices.reverse();
+
         let index = if node.op == NodeOp::Rand {
-            self.inner.add_node(node)
+            let index = self.dag.len();
+            self.dag.push((node, parent_indices));
+            index
         } else {
             *self
                 .duplicate_map
                 .entry((node.clone(), parent_indices.clone()))
-                .or_insert_with(|| self.inner.add_node(node))
+                .or_insert_with(|| {
+                    let index = self.dag.len();
+                    self.dag.push((node, parent_indices));
+                    index
+                })
         };
-        for parent_index in parent_indices {
-            self.inner.update_edge(parent_index, index, ()).unwrap();
-        }
         self.push(index);
     }
 }
@@ -92,60 +93,65 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
             code_a,
             code_b,
         } => match modifier {
-            DyadicModifier::Repeat => match &code_b[..] {
-                &[FunctionOrOp::Op(Op::Value(value))] => {
-                    let value = value as u32;
-                    let mut loops = value;
-                    let stack_delta = code_a.iter().map(|code| code.stack_delta()).sum::<i32>();
-                    let stack_usage = code_a.iter().map(|code| code.stack_usage()).sum::<u32>();
-
-                    if stack_delta > 0 {
-                        loops -= stack_usage;
-                    }
-
-                    for _ in 0..loops {
-                        for (i, op) in code_a.iter().enumerate() {
-                            handle_op(
-                                op.clone(),
-                                dag,
-                                ActiveModifiers {
-                                    // only fully evaluate the final loop result instead of every intermediate value.
-                                    // so e.g. 'repeat (max max)' does write(max(.., max(.., ..)))
-                                    // TODO: probably leaky?
-                                    in_loop: i == code_a.len() - 1,
-                                    ..modifiers
-                                },
-                            );
-                        }
-                    }
-
-                    match stack_delta {
-                        i32::MIN..=0 => {}
-                        1 => {
-                            let mut items: Vec<_> =
-                                (0..value).map(|_| dag.stack.pop().unwrap()).collect();
-                            items.reverse();
-                            dag.insert_node(
-                                Node {
-                                    op: NodeOp::CreateArray(ArrayContents::Stack(items.clone())),
-                                    size: Size::Known([items.len() as _, 1, 1, 1]),
-                                    is_string: false,
-                                    in_loop: modifiers.in_loop,
-                                },
-                                items,
-                            );
-                        }
-                        2..=i32::MAX => todo!(),
-                    }
-                }
-                other => panic!("{:?}", other),
-            },
+            DyadicModifier::Fork => todo!(),
         },
         FunctionOrOp::MonadicModifierFunction { modifier, code } => {
             let mut dipped = vec![];
             let mut reducing = None;
 
             match modifier {
+                MonadicModifier::Repeat => match &dag.dag[dag.stack.pop().unwrap()].0.op {
+                    NodeOp::Value(value) => {
+                        let value = **value as u32;
+                        let mut loops = value;
+                        let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
+                        let stack_usage = code.iter().map(|code| code.stack_usage()).sum::<u32>();
+
+                        if stack_delta > 0 {
+                            loops -= stack_usage;
+                        }
+
+                        for _ in 0..loops {
+                            for (i, op) in code.iter().enumerate() {
+                                handle_op(
+                                    op.clone(),
+                                    dag,
+                                    ActiveModifiers {
+                                        // only fully evaluate the final loop result instead of every intermediate value.
+                                        // so e.g. 'repeat (max max)' does write(max(.., max(.., ..)))
+                                        // TODO: probably leaky?
+                                        in_loop: i == code.len() - 1,
+                                        ..modifiers
+                                    },
+                                );
+                            }
+                        }
+
+                        match stack_delta {
+                            i32::MIN..=0 => {}
+                            1 => {
+                                let mut items: Vec<_> =
+                                    (0..value).map(|_| dag.stack.pop().unwrap()).collect();
+                                items.reverse();
+                                dag.insert_node(
+                                    Node {
+                                        op: NodeOp::CreateArray(ArrayContents::Stack(
+                                            items.clone(),
+                                        )),
+                                        size: Size::Known([items.len() as _, 1, 1, 1]),
+                                        is_string: false,
+                                        in_loop: modifiers.in_loop,
+                                    },
+                                    items,
+                                );
+                            }
+                            2..=i32::MAX => todo!(),
+                        }
+
+                        return;
+                    }
+                    other => panic!("{:?}", other),
+                },
                 MonadicModifier::Back => {
                     let x = dag.stack.pop().unwrap();
                     let y = dag.stack.pop().unwrap();
@@ -180,7 +186,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
                     assert_eq!(stack_delta, -1);
                     let reducing_array = *dag.stack.last().unwrap();
-                    let reducing_array_size = dag.inner[reducing_array].size;
+                    let reducing_array_size = dag.dag[reducing_array].0.size;
                     reducing = Some(*dag.stack.last().unwrap());
                     dag.insert_node(
                         Node {
@@ -195,7 +201,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                 }
                 MonadicModifier::Rows => {
                     let x = *dag.stack.last().unwrap();
-                    modifiers.override_size = Some(dag.inner[x].size);
+                    modifiers.override_size = Some(dag.dag[x].0.size);
                 }
                 MonadicModifier::Below => {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
@@ -304,13 +310,8 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         FunctionOrOp::Op(Op::Stack(StackOp::Ident)) => {
             // Potentially change size of the node on the top of the stack.
             let index = dag.stack.pop().unwrap();
-            let parents: Vec<_> = dag
-                .inner
-                .parents(index)
-                .iter(&dag.inner)
-                .map(|(_, index)| index)
-                .collect();
-            let mut node = dag.inner[index].clone();
+            let parents: Vec<_> = dag.dag[index].1.clone();
+            let mut node = dag.dag[index].0.clone();
             node.size = modifiers.override_size.unwrap_or(node.size);
             dag.insert_node(node, parents);
         }
@@ -345,7 +346,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                 Node {
                     op: NodeOp::Drop,
                     size: Size::Drop { array, num },
-                    is_string: dag.inner[array].is_string,
+                    is_string: dag.dag[array].0.is_string,
                     in_loop: modifiers.in_loop,
                 },
                 vec![num, array],
@@ -353,12 +354,12 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         }
         FunctionOrOp::Op(Op::Rev) => {
             let index = dag.stack.pop().unwrap();
-            let size = dag.inner[index].size;
+            let size = dag.dag[index].0.size;
             dag.insert_node(
                 Node {
                     op: NodeOp::Rev,
                     size,
-                    is_string: dag.inner[index].is_string,
+                    is_string: dag.dag[index].0.is_string,
                     in_loop: modifiers.in_loop,
                 },
                 vec![index],
@@ -366,7 +367,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         }
         FunctionOrOp::Op(Op::Monadic(op)) => {
             let index = dag.stack.pop().unwrap();
-            let size = dag.inner[index].size;
+            let size = dag.dag[index].0.size;
             dag.insert_node(
                 Node {
                     op: NodeOp::Monadic(op),
@@ -380,8 +381,8 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         FunctionOrOp::Op(Op::Dyadic(op)) => {
             let x = dag.stack.pop().unwrap();
             let y = dag.stack.pop().unwrap();
-            let x_val = &dag.inner[x];
-            let y_val = &dag.inner[y];
+            let x_val = &dag.dag[x].0;
+            let y_val = &dag.dag[y].0;
             let node = Node {
                 op: NodeOp::Dyadic {
                     is_table: matches!(modifiers.override_size, Some(Size::TransposeSizeOf(_, _))),
@@ -421,12 +422,12 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
     }
 }
 
-pub fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (daggy::Dag<Node, ()>, Vec<daggy::NodeIndex>) {
+pub fn parse_code_to_dag(code: Vec<FunctionOrOp>) -> (Vec<(Node, Vec<usize>)>, Vec<usize>) {
     let mut dag = Dag::default();
 
     for op in code {
         handle_op(op, &mut dag, Default::default());
     }
 
-    (dag.inner, dag.stack)
+    (dag.dag, dag.stack)
 }

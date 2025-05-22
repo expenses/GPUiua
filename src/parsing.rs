@@ -110,7 +110,10 @@ fn parse_code_blocks_inner<'a>(
     };
 
     match parse(token) {
-        Some(TokenType::AssignedOp(name)) => Ok(assignments.get(name).unwrap().clone()),
+        Some(TokenType::AssignedOp(name)) => match assignments.get(name).cloned() {
+            Some(blocks) => Ok(blocks),
+            None => Err(span),
+        },
         Some(TokenType::Op(op)) => Ok(vec![FunctionOrOp::Op(op)]),
         Some(TokenType::MonadicModifier(modifier)) => {
             Ok(vec![FunctionOrOp::MonadicModifierFunction {

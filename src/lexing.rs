@@ -175,6 +175,8 @@ impl<'a> FunctionOrOp<'a> {
                     MonadicModifier::On => 1,
                     MonadicModifier::Rows => 0,
                     MonadicModifier::Below => return 1,
+                    // idk
+                    MonadicModifier::Repeat => 0,
                 };
 
                 modifier + stack_delta
@@ -216,6 +218,8 @@ impl<'a> FunctionOrOp<'a> {
                     MonadicModifier::On => 0,
                     MonadicModifier::Rows => 0,
                     MonadicModifier::Below => 0,
+                    // idk
+                    MonadicModifier::Repeat => 0,
                 };
 
                 modifier + stack_usage
@@ -250,7 +254,7 @@ pub enum Op<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub enum DyadicModifier {
-    Repeat,
+    Fork,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -264,6 +268,7 @@ pub enum MonadicModifier {
     On,
     Rows,
     Below,
+    Repeat,
 }
 
 pub enum TokenType<'a> {
@@ -306,7 +311,7 @@ pub fn parse(token: Token) -> Option<TokenType> {
         Token::Reduce => TokenType::MonadicModifier(MonadicModifier::Reduce),
         Token::Rows => TokenType::MonadicModifier(MonadicModifier::Rows),
         Token::Below => TokenType::MonadicModifier(MonadicModifier::Below),
-        Token::Repeat => TokenType::DyadicModifier(DyadicModifier::Repeat),
+        Token::Repeat => TokenType::MonadicModifier(MonadicModifier::Repeat),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
