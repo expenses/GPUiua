@@ -93,7 +93,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 full_eval_to: &full_eval_to,
                 rng: &mut rng,
             },
-            true,
             item,
         );
         code_builder.functions[0]
@@ -322,7 +321,7 @@ fn evaluate<R: Rng>(
                     return reduction;
                 }}",
                 index,
-                evaluate_size(context, false, *reducing),
+                evaluate_size(context, *reducing),
                 evaluate(context, false, *reducing),
                 context.rng.random::<u32>(),
                 evaluate(
@@ -336,7 +335,7 @@ fn evaluate<R: Rng>(
         }
         NodeOp::ReduceResult => "reduction".to_string(),
         NodeOp::Len => {
-            let size = evaluate_size(context, false, context.dag[index].1[0]);
+            let size = evaluate_size(context, context.dag[index].1[0]);
             format!("f32({}[0])", size)
         }
         NodeOp::Monadic(op) => format!(
@@ -395,42 +394,28 @@ fn evaluate<R: Rng>(
 
 type AuxFunctions = HashMap<usize, String>;
 
-fn evaluate_size<R: Rng>(
-    context: &mut EvaluationContext<R>,
-    top_level_eval: bool,
-    index: usize,
-) -> String {
-    // Currently disabled because buffer allocation and copy ordering is not quite correct (dip_rev test).
-    //if !top_level_eval {
-    //    if let Some(buffer_index) = context.size_to_buffer.get(&context.dag[index].size) {
-    //        return format!("buffers[{}].size", buffer_index);
-    //    }
-    //}
-
+fn evaluate_size<R: Rng>(context: &mut EvaluationContext<R>, index: usize) -> String {
     match &context.dag[index].0.size {
         Size::Drop { array, num } => {
             format!(
                 "coord_plus_x({}, -{})",
-                evaluate_size(context, false, *array),
+                evaluate_size(context, *array),
                 evaluate(context, false, *num)
             )
         }
         Size::RangeOf(range) => {
-            format!(
-                "Coord(u32({}), 1, 1, 1)",
-                evaluate(context, false, *range)
-            )
+            format!("Coord(u32({}), 1, 1, 1)", evaluate(context, false, *range))
         }
         Size::Scalar => "Coord(1,1,1,1)".to_string(),
         Size::TransposeSizeOf(a, b) => format!(
             "coord_max({}, coord_transpose({}))",
-            evaluate_size(context, false, *a),
-            evaluate_size(context, false, *b)
+            evaluate_size(context, *a),
+            evaluate_size(context, *b)
         ),
         Size::MaxOf(a, b) => format!(
             "coord_max({}, {})",
-            evaluate_size(context, false, *a),
-            evaluate_size(context, false, *b)
+            evaluate_size(context, *a),
+            evaluate_size(context, *b)
         ),
         Size::Known([x, y, z, w]) => format!("Coord({}, {}, {}, {})", x, y, z, w),
     }

@@ -410,6 +410,50 @@ fn repeat_table() {
 }
 
 #[test]
+fn both_dyadic() {
+    assert_output(
+        "both + 1 2 3 4",
+        vec![ReadBackValue::scalar(7.0), ReadBackValue::scalar(3.0)],
+    );
+}
+
+#[test]
+fn both_monadic() {
+    assert_output(
+        "both (+1) 1 2 3 4",
+        vec![
+            ReadBackValue::scalar(4.0),
+            ReadBackValue::scalar(3.0),
+            ReadBackValue::scalar(3.0),
+            ReadBackValue::scalar(2.0),
+        ],
+    );
+}
+
+#[test]
+fn both_stack_pushes() {
+    assert_output(
+        "both (4 rand) 1",
+        vec![
+            ReadBackValue::scalar(1.0),
+            ReadBackValue::scalar(0.96570766),
+            ReadBackValue::scalar(4.0),
+            ReadBackValue::scalar(0.7708467),
+            ReadBackValue::scalar(4.0),
+        ],
+    );
+
+    assert_output(
+        "both (rand) 1",
+        vec![
+            ReadBackValue::scalar(1.0),
+            ReadBackValue::scalar(0.96570766),
+            ReadBackValue::scalar(0.6287222),
+        ],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

@@ -152,6 +152,17 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                     }
                     other => panic!("{:?}", other),
                 },
+                MonadicModifier::Both => {
+                    for op in &code {
+                        handle_op(op.clone(), dag, modifiers.clone());
+                    }
+
+                    let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
+
+                    if stack_delta < 1 {
+                        dipped.push(dag.stack.pop().unwrap());
+                    }
+                }
                 MonadicModifier::Back => {
                     let x = dag.stack.pop().unwrap();
                     let y = dag.stack.pop().unwrap();

@@ -87,6 +87,8 @@ pub enum Token<'source> {
     Repeat,
     #[regex(r"below|◡")]
     Below,
+    #[regex(r"both|∩")]
+    Both,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -159,9 +161,8 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
             Self::Op(Op::Len | Op::Rev | Op::Range) => 0,
-            Self::Op(Op::EndArray) => 0,
-            // Tricky
-            Self::Op(Op::StartArray) => 0,
+            Self::Op(Op::EndArray) => todo!(),
+            Self::Op(Op::StartArray) => todo!(),
             Self::MonadicModifierFunction { modifier, code } => {
                 let stack_delta = code.iter().map(|op| op.stack_delta()).sum::<i32>();
 
@@ -175,8 +176,8 @@ impl<'a> FunctionOrOp<'a> {
                     MonadicModifier::On => 1,
                     MonadicModifier::Rows => 0,
                     MonadicModifier::Below => return 1,
-                    // idk
-                    MonadicModifier::Repeat => 0,
+                    MonadicModifier::Repeat => todo!(),
+                    MonadicModifier::Both => todo!(),
                 };
 
                 modifier + stack_delta
@@ -202,9 +203,9 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => 1,
             Self::Op(Op::Len | Op::Rev | Op::Range) => 1,
-            Self::Op(Op::EndArray) => 0,
+            Self::Op(Op::EndArray) => todo!(),
             // Tricky
-            Self::Op(Op::StartArray) => 0,
+            Self::Op(Op::StartArray) => todo!(),
             Self::MonadicModifierFunction { modifier, code } => {
                 let stack_usage = code.iter().map(|op| op.stack_usage()).sum::<u32>();
 
@@ -218,8 +219,8 @@ impl<'a> FunctionOrOp<'a> {
                     MonadicModifier::On => 0,
                     MonadicModifier::Rows => 0,
                     MonadicModifier::Below => 0,
-                    // idk
-                    MonadicModifier::Repeat => 0,
+                    MonadicModifier::Repeat => todo!(),
+                    MonadicModifier::Both => todo!(),
                 };
 
                 modifier + stack_usage
@@ -269,6 +270,7 @@ pub enum MonadicModifier {
     Rows,
     Below,
     Repeat,
+    Both,
 }
 
 pub enum TokenType<'a> {
@@ -312,6 +314,7 @@ pub fn parse(token: Token) -> Option<TokenType> {
         Token::Rows => TokenType::MonadicModifier(MonadicModifier::Rows),
         Token::Below => TokenType::MonadicModifier(MonadicModifier::Below),
         Token::Repeat => TokenType::MonadicModifier(MonadicModifier::Repeat),
+        Token::Both => TokenType::MonadicModifier(MonadicModifier::Both),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
