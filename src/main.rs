@@ -24,11 +24,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         }
     }
 
-    let mut size_to_buffer: HashMap<Size, usize> = final_stack
-        .iter()
-        .enumerate()
-        .map(|(i, &index)| (dag[index].0.size, i))
-        .collect();
     let mut dummy_buffer_index = final_stack.len();
 
     {
@@ -54,7 +49,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                         full_eval_to
                             .entry(index)
                             .or_insert_with(|| (dummy_buffer_index, vec![]));
-                        size_to_buffer.insert(node.size, dummy_buffer_index);
                         dummy_buffer_index += 1;
                     }
                 }
@@ -71,7 +65,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     full_eval_to
                         .entry(index)
                         .or_insert_with(|| (dummy_buffer_index, vec![]));
-                    size_to_buffer.insert(node.size, dummy_buffer_index);
                     dummy_buffer_index += 1;
                 }
                 _ => {}
@@ -98,7 +91,6 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 dag: &dag,
                 functions: &mut code_builder.aux_functions,
                 full_eval_to: &full_eval_to,
-                size_to_buffer: &size_to_buffer,
                 rng: &mut rng,
             },
             true,
@@ -122,13 +114,11 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                 code_builder.functions[0].admin_lines.push(format!(
                     "write_to_buffer({}, Coord(0,0,0,0), {})",
                     i,
-                    evaluate_scalar(
+                    evaluate(
                         &mut EvaluationContext {
                             dag: &dag,
                             functions: &mut code_builder.aux_functions,
                             full_eval_to: &full_eval_to,
-                            size_to_buffer: &size_to_buffer,
-
                             rng: &mut rng,
                         },
                         true,
@@ -159,13 +149,11 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
                     .push(format!(
                         "write_to_buffer({}, thread_coord, {})",
                         i,
-                        evaluate_scalar(
+                        evaluate(
                             &mut EvaluationContext {
                                 dag: &dag,
                                 functions: &mut code_builder.aux_functions,
                                 full_eval_to: &full_eval_to,
-                                size_to_buffer: &size_to_buffer,
-
                                 rng: &mut rng,
                             },
                             true,
@@ -246,11 +234,10 @@ struct EvaluationContext<'a, R> {
     dag: &'a Vec<(Node, Vec<usize>)>,
     functions: &'a mut AuxFunctions,
     full_eval_to: &'a BTreeMap<usize, (usize, Vec<usize>)>,
-    size_to_buffer: &'a HashMap<Size, usize>,
     rng: &'a mut R,
 }
 
-fn evaluate_scalar<R: Rng>(
+fn evaluate<R: Rng>(
     context: &mut EvaluationContext<R>,
     top_level_eval: bool,
     index: usize,
@@ -268,8 +255,8 @@ fn evaluate_scalar<R: Rng>(
     match &context.dag[index].0.op {
         NodeOp::Drop => {
             let parents = &context.dag[index].1;
-            let array = evaluate_scalar(context, false, parents[0]);
-            let num = evaluate_scalar(context, false, parents[1]);
+            let array = evaluate(context, false, parents[0]);
+            let num = evaluate(context, false, parents[1]);
 
             context.functions.insert(
                 index,
@@ -295,7 +282,7 @@ fn evaluate_scalar<R: Rng>(
                 let children = match items {
                     ArrayContents::Stack(indices) => indices
                         .iter()
-                        .map(|child| evaluate_scalar(context, false, *child))
+                        .map(|child| evaluate(context, false, *child))
                         .collect::<Vec<_>>()
                         .join(", "),
                     ArrayContents::Chars(chars) => chars
@@ -336,9 +323,9 @@ fn evaluate_scalar<R: Rng>(
                 }}",
                 index,
                 evaluate_size(context, false, *reducing),
-                evaluate_scalar(context, false, *reducing),
+                evaluate(context, false, *reducing),
                 context.rng.random::<u32>(),
-                evaluate_scalar(
+                evaluate(
                     context,
                     false,
                     context.dag[index].1[0]
@@ -355,14 +342,14 @@ fn evaluate_scalar<R: Rng>(
         NodeOp::Monadic(op) => format!(
             "{}({})",
             format!("{:?}", op).to_lowercase(),
-            evaluate_scalar(context, false, context.dag[index].1[0],)
+            evaluate(context, false, context.dag[index].1[0],)
         ),
         NodeOp::Dyadic { op, is_table } => {
             let parents = &context.dag[index].1;
-            let mut arg_0 = evaluate_scalar(context, false, parents[0]);
+            let mut arg_0 = evaluate(context, false, parents[0]);
             let arg_1 = parents
                 .get(1)
-                .map(|&parent| evaluate_scalar(context, false, parent))
+                .map(|&parent| evaluate(context, false, parent))
                 .unwrap_or_else(|| arg_0.clone());
 
             if *is_table {
@@ -395,7 +382,7 @@ fn evaluate_scalar<R: Rng>(
                 }}",
                 index,
                 context.rng.random::<u32>(),
-                evaluate_scalar(context, false, context.dag[index].1[0])
+                evaluate(context, false, context.dag[index].1[0])
             );
             context.functions.insert(index, function);
             format!(
@@ -425,13 +412,13 @@ fn evaluate_size<R: Rng>(
             format!(
                 "coord_plus_x({}, -{})",
                 evaluate_size(context, false, *array),
-                evaluate_scalar(context, false, *num)
+                evaluate(context, false, *num)
             )
         }
         Size::RangeOf(range) => {
             format!(
                 "Coord(u32({}), 1, 1, 1)",
-                evaluate_scalar(context, false, *range)
+                evaluate(context, false, *range)
             )
         }
         Size::Scalar => "Coord(1,1,1,1)".to_string(),
