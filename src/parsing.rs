@@ -109,37 +109,37 @@ fn parse_code_blocks_inner<'a>(
         }
     };
 
-    match parse(token) {
-        Some(TokenType::AssignedOp(name)) => match assignments.get(name).cloned() {
-            Some(blocks) => Ok(blocks),
+    match token {
+        Token::ArrayLeft => Ok(vec![FunctionOrOp::Op(if left_to_right {
+            Op::StartArray
+        } else {
+            Op::EndArray
+        })]),
+        Token::ArrayRight => Ok(vec![FunctionOrOp::Op(if left_to_right {
+            Op::EndArray
+        } else {
+            Op::StartArray
+        })]),
+        _ => match parse(token) {
+            Some(TokenType::AssignedOp(name)) => match assignments.get(name).cloned() {
+                Some(blocks) => Ok(blocks),
+                None => Err(span),
+            },
+            Some(TokenType::Op(op)) => Ok(vec![FunctionOrOp::Op(op)]),
+            Some(TokenType::MonadicModifier(modifier)) => {
+                Ok(vec![FunctionOrOp::MonadicModifierFunction {
+                    modifier,
+                    code: get_blocks(span)?,
+                }])
+            }
+            Some(TokenType::DyadicModifier(modifier)) => {
+                Ok(vec![FunctionOrOp::DyadicModifierFunction {
+                    modifier,
+                    code_a: get_blocks(span.clone())?,
+                    code_b: get_blocks(span)?,
+                }])
+            }
             None => Err(span),
-        },
-        Some(TokenType::Op(op)) => Ok(vec![FunctionOrOp::Op(op)]),
-        Some(TokenType::MonadicModifier(modifier)) => {
-            Ok(vec![FunctionOrOp::MonadicModifierFunction {
-                modifier,
-                code: get_blocks(span)?,
-            }])
-        }
-        Some(TokenType::DyadicModifier(modifier)) => {
-            Ok(vec![FunctionOrOp::DyadicModifierFunction {
-                modifier,
-                code_a: get_blocks(span.clone())?,
-                code_b: get_blocks(span)?,
-            }])
-        }
-        None => match token {
-            Token::ArrayLeft => Ok(vec![FunctionOrOp::Op(if left_to_right {
-                Op::StartArray
-            } else {
-                Op::EndArray
-            })]),
-            Token::ArrayRight => Ok(vec![FunctionOrOp::Op(if left_to_right {
-                Op::EndArray
-            } else {
-                Op::StartArray
-            })]),
-            _ => Err(span),
         },
     }
 }

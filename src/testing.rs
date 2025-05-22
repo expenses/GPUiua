@@ -454,6 +454,123 @@ fn both_stack_pushes() {
 }
 
 #[test]
+fn fork_dyadic() {
+    assert_output(
+        "⊃+ - 4 5",
+        vec![ReadBackValue::scalar(1.0), ReadBackValue::scalar(9.0)],
+    );
+}
+
+#[test]
+fn fork_monadic() {
+    assert_output(
+        "fork ceil floor 4.5",
+        vec![ReadBackValue::scalar(4.0), ReadBackValue::scalar(5.0)],
+    );
+}
+
+#[test]
+fn fork_pushes() {
+    assert_output(
+        "⊃(5)(4) 3",
+        vec![
+            ReadBackValue::scalar(3.0),
+            ReadBackValue::scalar(4.0),
+            ReadBackValue::scalar(5.0),
+        ],
+    )
+}
+
+#[test]
+fn fork_idents() {
+    assert_output(
+        "⊃(∘)(∘) 5",
+        vec![ReadBackValue::scalar(5.0), ReadBackValue::scalar(5.0)],
+    );
+}
+
+#[test]
+fn fork_dupes() {
+    assert_output(
+        "⊃(.4)(.5)",
+        vec![
+            ReadBackValue::scalar(5.0),
+            ReadBackValue::scalar(5.0),
+            ReadBackValue::scalar(4.0),
+            ReadBackValue::scalar(4.0),
+        ],
+    );
+}
+
+#[test]
+fn audio_example_almost() {
+    assert_output(
+        "
+        [0 4 7 10]     # Notes
+        ×220 ˜ⁿ2÷12    # Freqs
+        ∿×τ ⊞× ÷⟜⇡&asr # Generate
+        len #÷⧻⟜/+⍉         # Mix
+        ",
+        vec![ReadBackValue::scalar(44100.0)],
+    )
+}
+
+#[test]
+fn sine_waves_almost() {
+    assert_output(
+        "
+        ⊞+⇡3∿∩(÷25)⇡240⇡80
+        ⊙⧻⧻ # ⍉⊞<
+        ",
+        vec![ReadBackValue::scalar(80.0), ReadBackValue::scalar(3.0)],
+    );
+}
+
+#[test]
+fn reverse_example() {
+    assert_output(
+        "⇌ 1_2_3_4 # Reverse",
+        vec![ReadBackValue {
+            size: [4, 1, 1, 1],
+            values: vec![4.0, 3.0, 2.0, 1.0],
+        }],
+    );
+}
+
+#[test]
+fn mod_op() {
+    assert_output(
+        "◿4 ¯1 ◿5 51",
+        vec![ReadBackValue::scalar(1.0), ReadBackValue::scalar(3.0)],
+    );
+}
+
+#[test]
+fn underscore_array() {
+    assert_output(
+        "div 5 32_23",
+        vec![ReadBackValue {
+            size: [2, 1, 1, 1],
+            values: vec![6.4, 4.6],
+        }],
+    );
+}
+
+#[test]
+fn uiua_logo_parsing_sorta() {
+    assert_output(
+        "
+        U ← /=⊞<0.2_0.7 /+×⟜ⁿ1_2
+        I ← <⊙(⌵)#/ℂ) # Circle
+        u ← +0.1↧#¤ ⊃(I0.95|⊂⊙0.5⇌°√)
+        A ← ×⊃U(I 1) # Alpha
+        #⍜°⍉(⊂⊃u A) ⊞⊟.-1×2÷⟜⇡200
+        ",
+        vec![],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

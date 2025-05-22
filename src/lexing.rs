@@ -1,8 +1,13 @@
 use logos::Logos;
 
-#[derive(Logos, Debug, PartialEq, Clone, Copy)]
+#[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t]+")]
 pub enum Token<'source> {
+    #[regex(r"[0-9]+(\.[0-9]+)?(_[0-9]+(\.[0-9]+)?)+", |lex| {
+        lex.slice().split('_').map(|value| value.parse::<f32>()).collect::<Result<Vec<_>, _>>().unwrap()
+        
+    })]
+    UnderscoreArray(Vec<f32>),
     #[regex("@.", |lex| lex.slice().chars().nth(1).unwrap())]
     Char(char),
     #[regex("\"[^\"]*\"", |lex| &lex.slice()[1..lex.slice().len()-1])]
@@ -37,12 +42,16 @@ pub enum Token<'source> {
     Rev,
     #[regex(r"max|↥")]
     Max,
+    #[regex(r"min|↧")]
+    Min,
     #[regex(r"round|⁅")]
     Round,
     #[regex(r"not|¬")]
     Not,
     #[regex("sub|-")]
     Sub,
+    #[regex("mod|◿")]
+    Mod,
     #[regex(r"back|˜")]
     Back,
     #[regex(r"dup|\.")]
@@ -89,6 +98,14 @@ pub enum Token<'source> {
     Below,
     #[regex(r"both|∩")]
     Both,
+    #[regex(r"fork|⊃")]
+    Fork,
+    #[regex(r"pow|ⁿ")]
+    Pow,
+    #[regex(r"tau|τ")]
+    Tau,
+    #[token("&asr")]
+    AudioSampleRate,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
     Value(f32),
     #[token("(")]
@@ -126,6 +143,9 @@ pub enum DyadicOp {
     Lt,
     Le,
     Ne,
+    Pow,
+    Min,
+    Modulus,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,7 +175,7 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::Monadic(_)) => 0,
             Self::Op(Op::Drop) => -1,
             Self::Op(Op::Dyadic(_)) => -1,
-            Self::Op(Op::Value(_)) | Self::Op(Op::String(_)) | Self::Op(Op::Char(_)) => 1,
+            Self::Op(Op::Value(_) | Op::String(_) | Op::Char(_) | Op::Array(_)) => 1,
             Self::Op(Op::Rand) => 1,
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
@@ -197,7 +217,7 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::Monadic(_)) => 1,
             Self::Op(Op::Drop) => 2,
             Self::Op(Op::Dyadic(_)) => 2,
-            Self::Op(Op::Value(_)) | Self::Op(Op::String(_)) | Self::Op(Op::Char(_)) => 0,
+            Self::Op(Op::Value(_) | Op::String(_) | Op::Char(_) | Op::Array(_)) => 0,
             Self::Op(Op::Rand) => 0,
             Self::Op(Op::Stack(StackOp::Dup)) => 0,
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
@@ -236,7 +256,7 @@ impl<'a> FunctionOrOp<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Op<'a> {
     Monadic(MonadicOp),
     Dyadic(DyadicOp),
@@ -251,6 +271,7 @@ pub enum Op<'a> {
     EndArray,
     String(&'a str),
     Char(char),
+    Array(Vec<f32>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -300,6 +321,9 @@ pub fn parse(token: Token) -> Option<TokenType> {
         Token::Div => TokenType::Op(Op::Dyadic(DyadicOp::Div)),
         Token::Max => TokenType::Op(Op::Dyadic(DyadicOp::Max)),
         Token::Sub => TokenType::Op(Op::Dyadic(DyadicOp::Sub)),
+        Token::Pow => TokenType::Op(Op::Dyadic(DyadicOp::Pow)),
+        Token::Min => TokenType::Op(Op::Dyadic(DyadicOp::Min)),
+        Token::Mod => TokenType::Op(Op::Dyadic(DyadicOp::Modulus)),
         Token::Sqrt => TokenType::Op(Op::Monadic(MonadicOp::Sqrt)),
         Token::Dup => TokenType::Op(Op::Stack(StackOp::Dup)),
         Token::Pop => TokenType::Op(Op::Stack(StackOp::Pop)),
@@ -315,15 +339,19 @@ pub fn parse(token: Token) -> Option<TokenType> {
         Token::Below => TokenType::MonadicModifier(MonadicModifier::Below),
         Token::Repeat => TokenType::MonadicModifier(MonadicModifier::Repeat),
         Token::Both => TokenType::MonadicModifier(MonadicModifier::Both),
+        Token::Fork => TokenType::DyadicModifier(DyadicModifier::Fork),
         Token::Rev => TokenType::Op(Op::Rev),
         Token::Rand => TokenType::Op(Op::Rand),
         Token::Range => TokenType::Op(Op::Range),
         Token::Len => TokenType::Op(Op::Len),
         Token::Drop => TokenType::Op(Op::Drop),
+        Token::AudioSampleRate => TokenType::Op(Op::Value(44100.0)),
+        Token::Tau => TokenType::Op(Op::Value(std::f32::consts::TAU)),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
         Token::String(string) => TokenType::Op(Op::String(string)),
         Token::Char(char) => TokenType::Op(Op::Char(char)),
         Token::AssignedName(string) => TokenType::AssignedOp(string),
+        Token::UnderscoreArray(array) => TokenType::Op(Op::Array(array)),
         Token::OpenParen
         | Token::CloseParen
         | Token::ArrayLeft

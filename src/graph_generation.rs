@@ -1,3 +1,5 @@
+use ordered_float::OrderedFloat;
+
 use crate::lexing::{
     DyadicModifier, DyadicOp, FunctionOrOp, MonadicModifier, MonadicOp, Op, StackOp,
 };
@@ -6,7 +8,7 @@ use std::collections::HashMap;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum ArrayContents {
     Stack(Vec<usize>),
-    Chars(Vec<char>),
+    Values(Vec<OrderedFloat<f32>>),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -93,7 +95,27 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
             code_a,
             code_b,
         } => match modifier {
-            DyadicModifier::Fork => todo!(),
+            DyadicModifier::Fork => {
+                let stack_delta = code_b.iter().map(|code| code.stack_delta()).sum::<i32>();
+
+                let mut copies = Vec::new();
+
+                for i in (dag.stack.len() as i32 + stack_delta - 1) as usize..dag.stack.len() {
+                    copies.push(*dag.stack.get(i).unwrap());
+                }
+
+                for op in &code_b {
+                    handle_op(op.clone(), dag, modifiers.clone());
+                }
+
+                for copy in copies {
+                    dag.stack.push(copy);
+                }
+
+                for op in &code_a {
+                    handle_op(op.clone(), dag, modifiers.clone());
+                }
+            }
         },
         FunctionOrOp::MonadicModifierFunction { modifier, code } => {
             let mut dipped = vec![];
@@ -262,9 +284,27 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         FunctionOrOp::Op(Op::String(string)) => {
             dag.insert_node(
                 Node {
-                    op: NodeOp::CreateArray(ArrayContents::Chars(string.chars().collect())),
+                    op: NodeOp::CreateArray(ArrayContents::Values(
+                        string
+                            .chars()
+                            .map(|char| (char as u32 as f32).into())
+                            .collect(),
+                    )),
                     size: Size::Known([string.len() as _, 1, 1, 1]),
                     is_string: true,
+                    in_loop: modifiers.in_loop,
+                },
+                vec![],
+            );
+        }
+        FunctionOrOp::Op(Op::Array(values)) => {
+            dag.insert_node(
+                Node {
+                    size: Size::Known([values.len() as _, 1, 1, 1]),
+                    op: NodeOp::CreateArray(ArrayContents::Values(
+                        values.into_iter().map(|value| value.into()).collect(),
+                    )),
+                    is_string: false,
                     in_loop: modifiers.in_loop,
                 },
                 vec![],

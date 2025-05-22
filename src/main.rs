@@ -284,9 +284,9 @@ fn evaluate<R: Rng>(
                         .map(|child| evaluate(context, false, *child))
                         .collect::<Vec<_>>()
                         .join(", "),
-                    ArrayContents::Chars(chars) => chars
+                    ArrayContents::Values(values) => values
                         .iter()
-                        .map(|&char| format!("{}", char as u32))
+                        .map(|&value| format!("{}", value))
                         .collect::<Vec<_>>()
                         .join(", "),
                 };

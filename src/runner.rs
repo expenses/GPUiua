@@ -214,10 +214,14 @@ impl Runner {
         string: &str,
         left_to_right: bool,
     ) -> Result<(Vec<ReadBackValue>, ShaderModule), String> {
-        let module = generate_module(
-            parse_code(string, left_to_right)
-                .map_err(|(str, span)| format!("'{}' {:?} '{}'", str, span.clone(), &str[span]))?,
-        );
+        let module =
+            generate_module(parse_code(string, left_to_right).map_err(|(str, span)| {
+                format!(
+                    "Unknown operation in line '{}': '{}'",
+                    str.trim(),
+                    &str[span]
+                )
+            })?);
         log::debug!("{}", module.code);
         Ok((self.run(&module).await, module))
     }
@@ -229,7 +233,7 @@ impl Runner {
     ) -> String {
         let (values, module) = match self.run_string(string, left_to_right).await {
             Ok(values) => values,
-            Err(error) => return format!("{:?}", error),
+            Err(error) => return error,
         };
 
         let mut output = String::new();

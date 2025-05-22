@@ -201,3 +201,8 @@ fn not(v: f32) -> f32 {
 fn neg(v: f32) -> f32 {
     return -v;
 }
+
+fn modulus(x: f32, y: f32) -> f32 {
+    // https://cs.stackexchange.com/questions/53031/what-is-the-difference-between-modulo-and-modulus#comment334015_53033
+    return (((x % y) + y) % y);
+}
