@@ -375,19 +375,13 @@ fn below_modifier() {
 
 #[test]
 fn fibonacci() {
-    assert_output("⍥◡+9 .1", vec![
-        ReadBackValue::scalar(1.0),
-        ReadBackValue::scalar(1.0),
-        ReadBackValue::scalar(2.0),
-        ReadBackValue::scalar(3.0),
-        ReadBackValue::scalar(5.0),
-        ReadBackValue::scalar(8.0),
-        ReadBackValue::scalar(13.0),
-        ReadBackValue::scalar(21.0),
-        ReadBackValue::scalar(34.0),
-        ReadBackValue::scalar(55.0),
-        ReadBackValue::scalar(89.0),
-    ]);
+    assert_output(
+        "⍥◡+9 .1",
+        vec![ReadBackValue {
+            size: [9, 1, 1, 1],
+            values: vec![1.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0],
+        }],
+    );
 }
 
 #[test]

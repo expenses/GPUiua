@@ -94,17 +94,47 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         } => match modifier {
             DyadicModifier::Repeat => match &code_b[..] {
                 &[FunctionOrOp::Op(Op::Value(value))] => {
-                    for _ in 0..value as u32 {
-                        for op in &code_a {
+                    let value = value as u32;
+                    let mut loops = value;
+                    let stack_delta = code_a.iter().map(|code| code.stack_delta()).sum::<i32>();
+
+                    if stack_delta > 0 {
+                        loops -= (stack_delta + 1) as u32;
+                    }
+
+                    for _ in 0..loops {
+                        for (i, op) in code_a.iter().enumerate() {
                             handle_op(
                                 op.clone(),
                                 dag,
                                 ActiveModifiers {
-                                    in_loop: true,
+                                    // only fully evaluate the final loop result instead of every intermediate value.
+                                    // so e.g. 'repeat (max max)' does write(max(.., max(.., ..)))
+                                    // TODO: probably leaky?
+                                    in_loop: i == code_a.len() - 1,
                                     ..modifiers
                                 },
                             );
                         }
+                    }
+
+                    match stack_delta {
+                        i32::MIN..=0 => {}
+                        1 => {
+                            let mut items: Vec<_> =
+                                (0..value).map(|_| dag.stack.pop().unwrap()).collect();
+                            items.reverse();
+                            dag.insert_node(
+                                Node {
+                                    op: NodeOp::CreateArray(ArrayContents::Stack(items.clone())),
+                                    size: Size::Known([items.len() as _, 1, 1, 1]),
+                                    is_string: false,
+                                    in_loop: modifiers.in_loop,
+                                },
+                                items,
+                            );
+                        }
+                        2..=i32::MAX => todo!(),
                     }
                 }
                 other => panic!("{:?}", other),
