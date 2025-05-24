@@ -257,29 +257,19 @@ fn evaluate<R: Rng>(
             let right = evaluate(context, false, parents[0]);
             let left_size = evaluate_size(context, parents[1]);
             let left = evaluate(context, false, parents[1]);
-            context.functions.insert(
+            insert_function(
+                context.functions,
                 format!("join_{}_right", index),
-                format!(
-                    "fn join_{}_right(thread_coord: Coord, dispatch_size: Coord) -> f32 {{
-                        return {};
-                    }}",
-                    index, right
-                ),
+                format!("return {};", right),
             );
-            context.functions.insert(
-                format!("join_{}", index),
-                format!(
-                    "fn join_{0}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{
-                        if (thread_coord[0] >= {1}[0]) {{
-                            return join_{0}_right(coord_plus_x(thread_coord, -f32({1}[0])), dispatch_size);
-                        }} else {{
-                            return {2};
-                        }}
-                    }}",
-                    index, left_size, left
-                ),
-            );
-            format!("join_{}(thread_coord, dispatch_size)", index)
+            insert_function(context.functions, format!("join_{}", index), format!("
+                if (thread_coord[0] >= {1}[0]) {{
+                    return join_{0}_right(coord_plus_x(thread_coord, -f32({1}[0])), coord_plus_x(dispatch_size, -f32({1}[0])), thread);
+                }} else {{
+                    return {2};
+                }}
+                ", index, left_size, left));
+            format!("join_{}(thread_coord, dispatch_size, thread)", index)
         }
         NodeOp::Drop => {
             let parents = &context.dag[index].1;
@@ -424,6 +414,18 @@ fn evaluate<R: Rng>(
 }
 
 type AuxFunctions = HashMap<String, String>;
+
+fn insert_function(functions: &mut AuxFunctions, name: String, body: String) {
+    functions.insert(
+        name.clone(),
+        format!(
+            "fn {}(thread_coord: Coord, dispatch_size: Coord, thread: vec3<u32>) -> f32 {{
+            {}
+        }}",
+            name, body
+        ),
+    );
+}
 
 fn evaluate_size<R: Rng>(context: &mut EvaluationContext<R>, index: usize) -> String {
     match &context.dag[index].0.size {
