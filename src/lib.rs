@@ -8,12 +8,15 @@ mod testing;
 
 pub use graph_generation::parse_code_to_dag;
 pub use parsing::parse_code;
+use std::ops::Range;
 
 use graph_generation::{ArrayContents, Node, NodeOp, Size};
-use lexing::FunctionOrOp;
+use lexing::FunctionOrOpWithContext;
 pub use runner::Runner;
 
-pub fn generate_module(code: Vec<FunctionOrOp>) -> Result<ShaderModule, graph_generation::Error> {
+pub fn generate_module(
+    code: Vec<FunctionOrOpWithContext>,
+) -> Result<ShaderModule, (graph_generation::Error, Range<usize>, &str)> {
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
     let (dag, final_stack) = parse_code_to_dag(code)?;

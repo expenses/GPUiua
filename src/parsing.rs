@@ -1,4 +1,4 @@
-use crate::lexing::{FunctionOrOp, Op, Token, TokenType, parse};
+use crate::lexing::{FunctionOrOp, FunctionOrOpWithContext, Op, Token, TokenType, parse};
 use logos::Logos;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -6,9 +6,9 @@ use std::ops::Range;
 pub fn parse_code(
     code: &str,
     left_to_right: bool,
-) -> Result<Vec<FunctionOrOp>, (&str, Range<usize>)> {
+) -> Result<Vec<FunctionOrOpWithContext>, (&str, Range<usize>)> {
     let mut parsed_code = Vec::new();
-    let mut assignments: HashMap<&str, Vec<FunctionOrOp>> = HashMap::new();
+    let mut assignments: HashMap<&str, Vec<FunctionOrOpWithContext>> = HashMap::new();
     for line in code.lines() {
         let line = line
             .split_once('#')
@@ -18,7 +18,7 @@ pub fn parse_code(
 
         if let Some((Ok(Token::AssignedName(name)), span)) = lexer.peek().cloned() {
             if assignments.contains_key(name) {
-                let blocks = parse_code_blocks(lexer, left_to_right, &assignments)
+                let blocks = parse_code_blocks(lexer, left_to_right, &assignments, line)
                     .map_err(|span| (line, span))?;
                 parsed_code.extend_from_slice(&blocks);
             } else {
@@ -30,12 +30,12 @@ pub fn parse_code(
                         return Err((line, span));
                     }
                 }
-                let blocks =
-                    parse_code_blocks(lexer, true, &assignments).map_err(|span| (line, span))?;
+                let blocks = parse_code_blocks(lexer, true, &assignments, line)
+                    .map_err(|span| (line, span))?;
                 assignments.insert(name, blocks);
             }
         } else {
-            let blocks = parse_code_blocks(lexer, left_to_right, &assignments)
+            let blocks = parse_code_blocks(lexer, left_to_right, &assignments, line)
                 .map_err(|span| (line, span))?;
             parsed_code.extend_from_slice(&blocks);
         }
@@ -47,12 +47,13 @@ pub fn parse_code(
 pub fn parse_code_blocks<'a>(
     mut lexer: std::iter::Peekable<logos::SpannedIter<'a, Token<'a>>>,
     left_to_right: bool,
-    assignments: &HashMap<&str, Vec<FunctionOrOp<'a>>>,
-) -> Result<Vec<FunctionOrOp<'a>>, Range<usize>> {
+    assignments: &HashMap<&str, Vec<FunctionOrOpWithContext<'a>>>,
+    line: &'a str,
+) -> Result<Vec<FunctionOrOpWithContext<'a>>, Range<usize>> {
     let mut blocks = Vec::new();
 
     loop {
-        let parsed_blocks = parse_code_blocks_inner(&mut lexer, left_to_right, assignments)?;
+        let parsed_blocks = parse_code_blocks_inner(&mut lexer, left_to_right, assignments, line)?;
         if parsed_blocks.is_empty() {
             break;
         }
@@ -69,8 +70,9 @@ pub fn parse_code_blocks<'a>(
 fn parse_code_blocks_inner<'a>(
     lexer: &mut std::iter::Peekable<logos::SpannedIter<'a, Token<'a>>>,
     left_to_right: bool,
-    assignments: &HashMap<&str, Vec<FunctionOrOp<'a>>>,
-) -> Result<Vec<FunctionOrOp<'a>>, Range<usize>> {
+    assignments: &HashMap<&str, Vec<FunctionOrOpWithContext<'a>>>,
+    line: &'a str,
+) -> Result<Vec<FunctionOrOpWithContext<'a>>, Range<usize>> {
     let (mut token, mut span) = match lexer.next() {
         Some((Ok(token), span)) => (token, span),
         Some((Err(()), span)) => return Err(span),
@@ -104,6 +106,7 @@ fn parse_code_blocks_inner<'a>(
                     lexer,
                     left_to_right,
                     assignments,
+                    line,
                 ) {
                     Ok(ops) if ops.is_empty() => return Err(span),
                     Ok(ops) => ops,
@@ -111,7 +114,7 @@ fn parse_code_blocks_inner<'a>(
                 })
             }
         } else {
-            match parse_code_blocks_inner(lexer, left_to_right, assignments) {
+            match parse_code_blocks_inner(lexer, left_to_right, assignments, line) {
                 Ok(ops) if ops.is_empty() => Err(span),
                 Ok(ops) => Ok(ops),
                 Err(span) => Err(span),
@@ -120,35 +123,51 @@ fn parse_code_blocks_inner<'a>(
     };
 
     match token {
-        Token::ArrayLeft => Ok(vec![FunctionOrOp::Op(if left_to_right {
-            Op::StartArray
-        } else {
-            Op::EndArray
-        })]),
-        Token::ArrayRight => Ok(vec![FunctionOrOp::Op(if left_to_right {
-            Op::EndArray
-        } else {
-            Op::StartArray
-        })]),
+        Token::ArrayLeft => Ok(vec![FunctionOrOpWithContext::new(
+            FunctionOrOp::Op(if left_to_right {
+                Op::StartArray
+            } else {
+                Op::EndArray
+            }),
+            span,
+            line,
+        )]),
+        Token::ArrayRight => Ok(vec![FunctionOrOpWithContext::new(
+            FunctionOrOp::Op(if left_to_right {
+                Op::EndArray
+            } else {
+                Op::StartArray
+            }),
+            span,
+            line,
+        )]),
         _ => match parse(token) {
             Some(TokenType::AssignedOp(name)) => match assignments.get(name).cloned() {
                 Some(blocks) => Ok(blocks),
                 None => Err(span),
             },
-            Some(TokenType::Op(op)) => Ok(vec![FunctionOrOp::Op(op)]),
-            Some(TokenType::MonadicModifier(modifier)) => {
-                Ok(vec![FunctionOrOp::MonadicModifierFunction {
+            Some(TokenType::Op(op)) => Ok(vec![FunctionOrOpWithContext::new(
+                FunctionOrOp::Op(op),
+                span,
+                line,
+            )]),
+            Some(TokenType::MonadicModifier(modifier)) => Ok(vec![FunctionOrOpWithContext::new(
+                FunctionOrOp::MonadicModifierFunction {
                     modifier,
-                    code: get_blocks(span)?,
-                }])
-            }
-            Some(TokenType::DyadicModifier(modifier)) => {
-                Ok(vec![FunctionOrOp::DyadicModifierFunction {
+                    code: get_blocks(span.clone())?,
+                },
+                span,
+                line,
+            )]),
+            Some(TokenType::DyadicModifier(modifier)) => Ok(vec![FunctionOrOpWithContext::new(
+                FunctionOrOp::DyadicModifierFunction {
                     modifier,
                     code_a: get_blocks(span.clone())?,
-                    code_b: get_blocks(span)?,
-                }])
-            }
+                    code_b: get_blocks(span.clone())?,
+                },
+                span,
+                line,
+            )]),
             None => Err(span),
         },
     }

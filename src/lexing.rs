@@ -1,4 +1,5 @@
 use logos::Logos;
+use std::ops::{Deref, Range};
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t]+")]
@@ -167,16 +168,37 @@ pub enum StackOp {
 }
 
 #[derive(Clone, Debug)]
+pub struct FunctionOrOpWithContext<'a> {
+    pub inner: FunctionOrOp<'a>,
+    pub span: Range<usize>,
+    pub line: &'a str,
+}
+
+impl<'a> Deref for FunctionOrOpWithContext<'a> {
+    type Target = FunctionOrOp<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'a> FunctionOrOpWithContext<'a> {
+    pub fn new(inner: FunctionOrOp<'a>, span: Range<usize>, line: &'a str) -> Self {
+        Self { inner, span, line }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum FunctionOrOp<'a> {
     Op(Op<'a>),
     MonadicModifierFunction {
         modifier: MonadicModifier,
-        code: Vec<FunctionOrOp<'a>>,
+        code: Vec<FunctionOrOpWithContext<'a>>,
     },
     DyadicModifierFunction {
         modifier: DyadicModifier,
-        code_a: Vec<FunctionOrOp<'a>>,
-        code_b: Vec<FunctionOrOp<'a>>,
+        code_a: Vec<FunctionOrOpWithContext<'a>>,
+        code_b: Vec<FunctionOrOpWithContext<'a>>,
     },
 }
 

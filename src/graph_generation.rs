@@ -1,9 +1,11 @@
 use ordered_float::OrderedFloat;
 
 use crate::lexing::{
-    DyadicModifier, DyadicOp, FunctionOrOp, MonadicModifier, MonadicOp, Op, StackOp,
+    DyadicModifier, DyadicOp, FunctionOrOp, FunctionOrOpWithContext, MonadicModifier, MonadicOp,
+    Op, StackOp,
 };
 use std::collections::HashMap;
+use std::ops::Range;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum ArrayContents {
@@ -98,8 +100,12 @@ pub enum Error {
     LoopCountTooHigh,
 }
 
-fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) -> Result<(), Error> {
-    match op {
+fn handle_op(
+    op: FunctionOrOpWithContext,
+    dag: &mut Dag,
+    mut modifiers: ActiveModifiers,
+) -> Result<(), Error> {
+    match op.inner {
         FunctionOrOp::DyadicModifierFunction {
             modifier,
             code_a,
@@ -304,7 +310,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) ->
             }
 
             for op in code {
-                handle_op(op, dag, modifiers.clone())?;
+                handle_op(op.clone(), dag, modifiers.clone())?;
             }
 
             if let Some(reducing) = reducing {
@@ -556,12 +562,13 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) ->
 }
 
 pub fn parse_code_to_dag(
-    code: Vec<FunctionOrOp>,
-) -> Result<(Vec<(Node, Vec<usize>)>, Vec<usize>), Error> {
+    code: Vec<FunctionOrOpWithContext>,
+) -> Result<(Vec<(Node, Vec<usize>)>, Vec<usize>), (Error, Range<usize>, &str)> {
     let mut dag = Dag::default();
 
     for op in code {
-        handle_op(op, &mut dag, Default::default())?;
+        handle_op(op.clone(), &mut dag, Default::default())
+            .map_err(|err| (err, op.span, op.line))?;
     }
 
     Ok((dag.dag, dag.stack))

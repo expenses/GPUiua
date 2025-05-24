@@ -223,7 +223,15 @@ impl Runner {
                     &str[span]
                 )
             })?)
-            .map_err(|err| format!("{:?}", err))?;
+            .map_err(|(err, span, line)| {
+                format!(
+                    "Error interpreting line '{}': {:?} at '{}' ({:?})",
+                    line,
+                    err,
+                    &line[span.clone()],
+                    span
+                )
+            })?;
         log::debug!("{}", module.code);
         Ok((self.run(&module).await, module))
     }

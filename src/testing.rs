@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::{
     ReadBackValue, Runner,
-    lexing::{DyadicOp, FunctionOrOp, MonadicModifier, Op},
+    lexing::{DyadicOp, FunctionOrOp, FunctionOrOpWithContext, MonadicModifier, Op},
 };
 
 #[cfg(test)]
@@ -151,7 +151,11 @@ fn function_delta() {
     assert_eq!(
         FunctionOrOp::MonadicModifierFunction {
             modifier: MonadicModifier::Table,
-            code: vec![FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq))]
+            code: vec![FunctionOrOpWithContext::new(
+                FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq)),
+                0..0,
+                ""
+            )]
         }
         .stack_delta(),
         Ok(-1)
