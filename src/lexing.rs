@@ -5,7 +5,6 @@ use logos::Logos;
 pub enum Token<'source> {
     #[regex(r"[0-9]+(\.[0-9]+)?(_[0-9]+(\.[0-9]+)?)+", |lex| {
         lex.slice().split('_').map(|value| value.parse::<f32>()).collect::<Result<Vec<_>, _>>().unwrap()
-        
     })]
     UnderscoreArray(Vec<f32>),
     #[regex("@.", |lex| lex.slice().chars().nth(1).unwrap())]

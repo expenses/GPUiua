@@ -50,9 +50,9 @@ struct Buffer {
 fn coord_clamp(coord: Coord, size: Coord) -> Coord {
     return Coord(
         min(coord[0], size[0] - 1),
-        min(coord[1], size[1] - 1),
-        min(coord[2], size[2] - 1),
-        min(coord[3], size[3] - 1)
+        min(coord[1], size[1]),
+        min(coord[2], size[2]),
+        min(coord[3], size[3])
     );
 }
 
@@ -66,10 +66,10 @@ fn coord_max(a: Coord, b: Coord) -> Coord {
 }
 
 fn coord_any_ge(a: Coord, b: Coord) -> bool {
-    return a[0] >= b[0]
-        || a[1] >= b[1]
-        || a[2] >= b[2]
-        || a[3] >= b[3];
+    return a[0] > b[0]
+        || a[1] > b[1]
+        || a[2] > b[2]
+        || a[3] > b[3];
 }
 
 fn coord_to_index(coord: Coord, size: Coord) -> u32 {
@@ -90,9 +90,9 @@ fn index_to_coord(index: u32, size: Coord) -> Coord {
 
 fn coord_prod(coord: Coord) -> u32 {
     return coord[0]
-         * coord[1]
-         * coord[2]
-         * coord[3];
+         * max(coord[1], 1)
+         * max(coord[2], 1)
+         * max(coord[3], 1);
 }
 
 fn coord_reverse(coord: Coord, size: Coord) -> Coord {
@@ -103,6 +103,21 @@ fn coord_reverse(coord: Coord, size: Coord) -> Coord {
         coord[3]
     );
 }
+
+fn coord_table(a: Coord, b: Coord) -> Coord {
+    // todo!
+    if (any(max(vec3(a[1], a[2], a[3]), vec3(b[1], b[2], b[3])) != vec3(0))) {
+        return Coord(0,0,0,0);
+    }
+
+    return Coord(
+        a[0],
+        b[0],
+        0,
+        0
+    );
+}
+
 
 fn coord_transpose(coord: Coord) -> Coord {
     return Coord(

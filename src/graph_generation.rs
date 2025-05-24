@@ -38,9 +38,9 @@ pub struct Node {
 pub enum Size {
     Scalar,
     Known([u32; 4]),
-    RangeOf(usize),
-    MaxOf(usize, usize),
-    TransposeSizeOf(usize, usize),
+    Range(usize),
+    Dyadic(usize, usize),
+    Table(usize, usize),
     Drop { array: usize, num: usize },
 }
 
@@ -160,7 +160,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                                         op: NodeOp::CreateArray(ArrayContents::Stack(
                                             items.clone(),
                                         )),
-                                        size: Size::Known([items.len() as _, 1, 1, 1]),
+                                        size: Size::Known([items.len() as _, 0, 0, 0]),
                                         is_string: false,
                                         in_loop: modifiers.in_loop,
                                     },
@@ -213,7 +213,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                 MonadicModifier::Table => {
                     let x = dag.stack.last().unwrap();
                     let y = dag.stack.get(dag.stack.len() - 2).unwrap();
-                    modifiers.override_size = Some(Size::TransposeSizeOf(*x, *y));
+                    modifiers.override_size = Some(Size::Table(*x, *y));
                 }
                 MonadicModifier::Reduce => {
                     let stack_delta = code.iter().map(|code| code.stack_delta()).sum::<i32>();
@@ -290,7 +290,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                             .map(|char| (char as u32 as f32).into())
                             .collect(),
                     )),
-                    size: Size::Known([string.len() as _, 1, 1, 1]),
+                    size: Size::Known([string.len() as _, 0, 0, 0]),
                     is_string: true,
                     in_loop: modifiers.in_loop,
                 },
@@ -300,7 +300,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
         FunctionOrOp::Op(Op::Array(values)) => {
             dag.insert_node(
                 Node {
-                    size: Size::Known([values.len() as _, 1, 1, 1]),
+                    size: Size::Known([values.len() as _, 0, 0, 0]),
                     op: NodeOp::CreateArray(ArrayContents::Values(
                         values.into_iter().map(|value| value.into()).collect(),
                     )),
@@ -316,7 +316,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
             dag.insert_node(
                 Node {
                     op: NodeOp::CreateArray(ArrayContents::Stack(items.clone())),
-                    size: Size::Known([items.len() as _, 1, 1, 1]),
+                    size: Size::Known([items.len() as _, 0, 0, 0]),
                     is_string: false,
                     in_loop: modifiers.in_loop,
                 },
@@ -383,7 +383,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
             dag.insert_node(
                 Node {
                     op: NodeOp::Range,
-                    size: Size::RangeOf(parent_index),
+                    size: Size::Range(parent_index),
                     is_string: false,
                     in_loop: modifiers.in_loop,
                 },
@@ -436,7 +436,7 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
             let y_val = &dag.dag[y].0;
             let node = Node {
                 op: NodeOp::Dyadic {
-                    is_table: matches!(modifiers.override_size, Some(Size::TransposeSizeOf(_, _))),
+                    is_table: matches!(modifiers.override_size, Some(Size::Table(_, _))),
                     op,
                 },
                 is_string: x_val.is_string && y_val.is_string,
@@ -451,20 +451,20 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                             x[2].max(y[2]),
                             x[3].max(y[3]),
                         ]),
-                        (Size::RangeOf(x), Size::RangeOf(y)) if x == y => Size::RangeOf(x),
-                        (Size::MaxOf(a, b), Size::MaxOf(c, d))
+                        (Size::Range(x), Size::Range(y)) if x == y => Size::Range(x),
+                        (Size::Dyadic(a, b), Size::Dyadic(c, d))
                             if (a == c && b == d) || (a == d && b == c) =>
                         {
-                            Size::MaxOf(a, b)
+                            Size::Dyadic(a, b)
                         }
-                        (Size::TransposeSizeOf(a, b), Size::TransposeSizeOf(c, d))
+                        (Size::Table(a, b), Size::Table(c, d))
                             if (a == c && b == d) || (a == d && b == c) =>
                         {
-                            Size::TransposeSizeOf(a, b)
+                            Size::Table(a, b)
                         }
                         (Size::Scalar, other) | (other, Size::Scalar) => other,
                         // give up
-                        _ => Size::MaxOf(x, y),
+                        _ => Size::Dyadic(x, y),
                     }
                 },
             };

@@ -23,7 +23,7 @@ fn identity_matrix_cross() {
         ↥   # Max
         ",
         vec![ReadBackValue {
-            size: [5, 5, 1, 1],
+            size: [5, 5, 0, 0],
             #[rustfmt::skip]
             values: vec![
                 1.0, 0.0, 0.0, 0.0, 1.0,
@@ -72,7 +72,7 @@ fn table_ident() {
     assert_output(
         "⊞⋅⋅∘ . ⇡ . 3",
         vec![ReadBackValue {
-            size: [3, 3, 1, 1],
+            size: [3, 3, 0, 0],
             values: vec![3.0; 9],
         }],
     );
@@ -84,7 +84,7 @@ fn identical_range_after_table() {
         "range 3 table max . range 3",
         vec![
             ReadBackValue {
-                size: [3, 3, 1, 1],
+                size: [3, 3, 0, 0],
                 #[rustfmt::skip]
                 values: vec![
                         0.0, 1.0, 2.0,
@@ -93,7 +93,7 @@ fn identical_range_after_table() {
                 ],
             },
             ReadBackValue {
-                size: [3, 1, 1, 1],
+                size: [3, 0, 0, 0],
                 values: vec![0.0, 1.0, 2.0],
             },
         ],
@@ -105,7 +105,7 @@ fn table_double_gap() {
     assert_output(
         "table gap gap 5 . range 2",
         vec![ReadBackValue {
-            size: [2, 2, 1, 1],
+            size: [2, 2, 0, 0],
             values: vec![5.0, 5.0, 5.0, 5.0],
         }],
     );
@@ -116,7 +116,7 @@ fn table_pop_in_parens() {
     assert_output(
         "table (5 pop pop) . range 2",
         vec![ReadBackValue {
-            size: [2, 2, 1, 1],
+            size: [2, 2, 0, 0],
             values: vec![5.0, 5.0, 5.0, 5.0],
         }],
     );
@@ -175,7 +175,7 @@ fn rng_table() {
     assert_output(
         "table gap gap rand . range 3",
         vec![ReadBackValue {
-            size: [3, 3, 1, 1],
+            size: [3, 3, 0, 0],
             values: vec![
                 0.4196651, 0.7859788, 0.84304845, 0.56487226, 0.15387845, 0.9303609, 0.51091456,
                 0.705348, 0.974491,
@@ -189,7 +189,7 @@ fn rand_in_rev() {
     assert_output(
         "rev rev table gap gap rand . range 3",
         vec![ReadBackValue {
-            size: [3, 3, 1, 1],
+            size: [3, 3, 0, 0],
             values: vec![
                 0.4196651, 0.7859788, 0.84304845, 0.56487226, 0.15387845, 0.9303609, 0.51091456,
                 0.705348, 0.974491,
@@ -224,7 +224,7 @@ fn max_different_sized_arrays() {
     assert_output(
         "+ range 5 range 4",
         vec![ReadBackValue {
-            size: [5, 1, 1, 1],
+            size: [5, 0, 0, 0],
             // 7.0 because the read from range 4 is clamped.
             values: vec![0.0, 2.0, 4.0, 6.0, 7.0],
         }],
@@ -238,7 +238,7 @@ fn array_creation() {
         vec![
             ReadBackValue::scalar(1.0),
             ReadBackValue {
-                size: [3, 1, 1, 1],
+                size: [3, 0, 0, 0],
                 values: vec![0.96570766, 0.96570766, 0.74225104],
             },
         ],
@@ -251,7 +251,7 @@ fn array_creation_mirrors_uiua() {
         "[ident] len range 5 [.]1",
         vec![
             ReadBackValue {
-                size: [2, 1, 1, 1],
+                size: [2, 0, 0, 0],
                 values: vec![1.0; 2],
             },
             ReadBackValue::scalar(5.0),
@@ -264,7 +264,7 @@ fn rows_rand() {
     assert_output(
         "rows gap rand range 5",
         vec![ReadBackValue {
-            size: [5, 1, 1, 1],
+            size: [5, 0, 0, 0],
             values: vec![0.4196651, 0.7859788, 0.84304845, 0.56487226, 0.15387845],
         }],
     );
@@ -275,7 +275,7 @@ fn strings_and_chars() {
     assert_output(
         "ne@ \"hi :)\"",
         vec![ReadBackValue {
-            size: [5, 1, 1, 1],
+            size: [5, 0, 0, 0],
             values: vec![1.0, 1.0, 0.0, 1.0, 1.0],
         }],
     );
@@ -291,7 +291,7 @@ fn string_example() {
             ⊙◌
         ",
         vec![ReadBackValue {
-            size: [28, 1, 1, 1],
+            size: [28, 0, 0, 0],
             values: vec![
                 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0,
                 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
@@ -310,7 +310,7 @@ fn drop_2d() {
     assert_output(
         "drop 2 table max . range 5",
         vec![ReadBackValue {
-            size: [3, 5, 1, 1],
+            size: [3, 5, 0, 0],
             #[rustfmt::skip]
             values: vec![
                 2.0, 3.0, 4.0,
@@ -329,15 +329,20 @@ fn double_drop_add() {
         "+drop 1 drop 1 .. table max .. range 3",
         vec![
             ReadBackValue {
-                size: [3, 1, 1, 1],
+                size: [3, 0, 0, 0],
                 values: vec![0.0, 1.0, 2.0],
             },
             ReadBackValue {
-                size: [3, 3, 1, 1],
-                values: vec![0.0, 1.0, 2.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                size: [3, 3, 0, 0],
+                #[rustfmt::skip]
+                values: vec![
+                    0.0, 1.0, 2.0,
+                    1.0, 1.0, 2.0,
+                    2.0, 2.0, 2.0
+                ],
             },
             ReadBackValue {
-                size: [3, 3, 1, 1],
+                size: [3, 3, 0, 0],
                 values: vec![2.0, 3.0, 4.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             },
         ],
@@ -350,11 +355,11 @@ fn dip_rev() {
         "dip rev drop 2 . range 3",
         vec![
             ReadBackValue {
-                size: [3, 1, 1, 1],
+                size: [3, 0, 0, 0],
                 values: vec![2.0, 1.0, 0.0],
             },
             ReadBackValue {
-                size: [1, 1, 1, 1],
+                size: [1, 0, 0, 0],
                 values: vec![2.0],
             },
         ],
@@ -378,7 +383,7 @@ fn fibonacci() {
     assert_output(
         "⍥◡+9 .1",
         vec![ReadBackValue {
-            size: [9, 1, 1, 1],
+            size: [9, 0, 0, 0],
             values: vec![1.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0],
         }],
     );
@@ -389,7 +394,7 @@ fn floor_repeat_rand() {
     assert_output(
         "floor*10 repeat rand 5",
         vec![ReadBackValue {
-            size: [5, 1, 1, 1],
+            size: [5, 0, 0, 0],
             values: vec![7.0, 9.0, 6.0, 7.0, 0.0],
         }],
     );
@@ -401,7 +406,7 @@ fn repeat_table() {
         "dip repeat(mul 2).8 table gap gap 1.range 3",
         vec![
             ReadBackValue {
-                size: [3, 3, 1, 1],
+                size: [3, 3, 0, 0],
                 values: vec![256.0; 9],
             },
             ReadBackValue::scalar(8.0),
@@ -531,7 +536,7 @@ fn reverse_example() {
     assert_output(
         "⇌ 1_2_3_4 # Reverse",
         vec![ReadBackValue {
-            size: [4, 1, 1, 1],
+            size: [4, 0, 0, 0],
             values: vec![4.0, 3.0, 2.0, 1.0],
         }],
     );
@@ -550,7 +555,7 @@ fn underscore_array() {
     assert_output(
         "div 5 32_23",
         vec![ReadBackValue {
-            size: [2, 1, 1, 1],
+            size: [2, 0, 0, 0],
             values: vec![6.4, 4.6],
         }],
     );
@@ -576,7 +581,7 @@ fn spiral() {
         "⟜(×20-⊸¬÷⟜⇡)200",
         vec![
             ReadBackValue {
-                size: [200, 1, 1, 1],
+                size: [200, 0, 0, 0],
                 values: vec![
                     -20.0,
                     -19.8,

@@ -203,7 +203,8 @@ impl Runner {
             .take(module.final_stack_data.len())
             .map(|&[x, y, z, w, offset, ..]| ReadBackValue {
                 size: [x, y, z, w],
-                values: values[offset as usize..offset as usize + (x * y * z * w) as usize]
+                values: values[offset as usize
+                    ..offset as usize + (x * y.max(1) * z.max(1) * w.max(1)) as usize]
                     .to_vec(),
             })
             .collect()
@@ -252,11 +253,11 @@ impl Runner {
                 [0, 0, 0, 0] => {
                     println!("empty")
                 }
-                [1, 1, 1, 1] => output.push_str(&format!("{}\n", value.values[0])),
-                [_, 1, 1, 1] => {
+                [1, 0, 0, 0] => output.push_str(&format!("{}\n", value.values[0])),
+                [_, 0, 0, 0] => {
                     print(&mut output, &value.values);
                 }
-                [x, _, 1, 1] => {
+                [x, _, 0, 0] => {
                     output.push('\n');
                     for chunk in value.values.chunks(x as usize) {
                         print(&mut output, chunk);

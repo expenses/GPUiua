@@ -42,7 +42,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
             match node {
                 Node {
                     op: NodeOp::Dyadic { .. },
-                    size: Size::MaxOf(_, _),
+                    size: Size::Dyadic(_, _),
                     ..
                 } => {
                     for &index in &dag[index].1 {
@@ -163,7 +163,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         }
     }
 
-    let mut shader = include_str!("../out.wgsl").to_string();
+    let mut shader = include_str!("shader.wgsl").to_string();
 
     for (_, function) in code_builder.aux_functions {
         shader.push_str(&function);
@@ -272,7 +272,7 @@ fn evaluate<R: Rng>(
         }
         NodeOp::CreateArray(items) => {
             let size = match context.dag[index].0.size {
-                Size::Known([x, 1, 1, 1]) => x,
+                Size::Known([x, 0, 0, 0]) => x,
                 Size::Scalar => 1,
                 _ => unreachable!(),
             };
@@ -403,16 +403,16 @@ fn evaluate_size<R: Rng>(context: &mut EvaluationContext<R>, index: usize) -> St
                 evaluate(context, false, *num)
             )
         }
-        Size::RangeOf(range) => {
-            format!("Coord(u32({}), 1, 1, 1)", evaluate(context, false, *range))
+        Size::Range(range) => {
+            format!("Coord(u32({}), 0, 0, 0)", evaluate(context, false, *range))
         }
-        Size::Scalar => "Coord(1,1,1,1)".to_string(),
-        Size::TransposeSizeOf(a, b) => format!(
-            "coord_max({}, coord_transpose({}))",
+        Size::Scalar => "Coord(1,0,0,0)".to_string(),
+        Size::Table(a, b) => format!(
+            "coord_table({}, {})",
             evaluate_size(context, *a),
             evaluate_size(context, *b)
         ),
-        Size::MaxOf(a, b) => format!(
+        Size::Dyadic(a, b) => format!(
             "coord_max({}, {})",
             evaluate_size(context, *a),
             evaluate_size(context, *b)
@@ -492,7 +492,7 @@ struct ReadBackValue {
 impl ReadBackValue {
     fn scalar(value: f32) -> Self {
         Self {
-            size: [1; 4],
+            size: [1, 0, 0, 0],
             values: vec![value],
         }
     }
