@@ -20,6 +20,7 @@ pub enum NodeOp {
     Rand,
     Len,
     Drop,
+    Join,
     Value(ordered_float::OrderedFloat<f32>),
     ReduceResult,
     Reduce(usize),
@@ -41,6 +42,7 @@ pub enum Size {
     Range(usize),
     Dyadic(usize, usize),
     Table(usize, usize),
+    Join(usize, usize),
     Drop { array: usize, num: usize },
 }
 
@@ -401,6 +403,28 @@ fn handle_op(op: FunctionOrOp, dag: &mut Dag, mut modifiers: ActiveModifiers) {
                     in_loop: modifiers.in_loop,
                 },
                 vec![num, array],
+            );
+        }
+        FunctionOrOp::Op(Op::Join) => {
+            let a = dag.stack.pop().unwrap();
+            let b = dag.stack.pop().unwrap();
+            dag.insert_node(
+                Node {
+                    op: NodeOp::Join,
+                    size: match (dag.dag[a].0.size, dag.dag[b].0.size) {
+                        (Size::Scalar, Size::Scalar) => Size::Known([2, 0, 0, 0]),
+                        (Size::Scalar, Size::Known(known)) | (Size::Known(known), Size::Scalar) => {
+                            Size::Known([known[0] + 1, known[1], known[2], known[3]])
+                        }
+                        (Size::Known(a), Size::Known(b)) => {
+                            Size::Known([a[0] + b[0], a[1], a[2], a[3]])
+                        }
+                        _ => Size::Join(a, b),
+                    },
+                    is_string: dag.dag[a].0.is_string && dag.dag[b].0.is_string,
+                    in_loop: modifiers.in_loop,
+                },
+                vec![a, b],
             );
         }
         FunctionOrOp::Op(Op::Rev) => {

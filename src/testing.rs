@@ -576,6 +576,25 @@ fn uiua_logo_parsing_sorta() {
 }
 
 #[test]
+fn basic_joins() {
+    assert_output(
+        "join 3 join 1 2",
+        vec![ReadBackValue {
+            size: [3, 0, 0, 0],
+            values: vec![3.0, 1.0, 2.0],
+        }],
+    );
+
+    assert_output(
+        "join 3_4 1_2",
+        vec![ReadBackValue {
+            size: [4, 0, 0, 0],
+            values: vec![3.0, 4.0, 1.0, 2.0],
+        }],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

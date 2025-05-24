@@ -65,7 +65,7 @@ fn coord_max(a: Coord, b: Coord) -> Coord {
     );
 }
 
-fn coord_any_ge(a: Coord, b: Coord) -> bool {
+fn coord_any_gt(a: Coord, b: Coord) -> bool {
     return a[0] > b[0]
         || a[1] > b[1]
         || a[2] > b[2]
@@ -139,7 +139,7 @@ fn coord_plus_x(coord: Coord, x: f32) -> Coord {
 
 fn write_to_buffer(buffer_index: u32, coord: Coord, value: f32) {
     let buffer = buffers[buffer_index];
-    if (coord_any_ge(coord, buffer.size)) {
+    if (coord_any_gt(coord, buffer.size)) {
         return;
     }
     let index = coord_to_index(coord, buffer.size);

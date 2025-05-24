@@ -195,7 +195,7 @@ fn generate_module(code: Vec<FunctionOrOp>) -> ShaderModule {
         if let Some(index) = pair.dispatching_on_buffer_index {
             shader.push_str(&format!("let dispatch_size = buffers[{}].size;\n", index));
             shader.push_str("let thread_coord = index_to_coord(thread.x, dispatch_size);\n");
-            shader.push_str("if (coord_any_ge(thread_coord, dispatch_size)) {return;}\n");
+            shader.push_str("if (coord_any_gt(thread_coord, dispatch_size)) {return;}\n");
             shader.push_str(&format!(
                 "let random_seed = thread.x + {};\n",
                 rng.random::<u32>()
@@ -252,13 +252,42 @@ fn evaluate<R: Rng>(
     }
 
     match &context.dag[index].0.op {
+        NodeOp::Join => {
+            let parents = &context.dag[index].1;
+            let right = evaluate(context, false, parents[0]);
+            let left_size = evaluate_size(context, parents[1]);
+            let left = evaluate(context, false, parents[1]);
+            context.functions.insert(
+                format!("join_{}_right", index),
+                format!(
+                    "fn join_{}_right(thread_coord: Coord, dispatch_size: Coord) -> f32 {{
+                        return {};
+                    }}",
+                    index, right
+                ),
+            );
+            context.functions.insert(
+                format!("join_{}", index),
+                format!(
+                    "fn join_{0}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{
+                        if (thread_coord[0] >= {1}[0]) {{
+                            return join_{0}_right(coord_plus_x(thread_coord, -f32({1}[0])), dispatch_size);
+                        }} else {{
+                            return {2};
+                        }}
+                    }}",
+                    index, left_size, left
+                ),
+            );
+            format!("join_{}(thread_coord, dispatch_size)", index)
+        }
         NodeOp::Drop => {
             let parents = &context.dag[index].1;
             let array = evaluate(context, false, parents[0]);
             let num = evaluate(context, false, parents[1]);
 
             context.functions.insert(
-                index,
+                format!("drop_{}", index),
                 format!(
                     "fn drop_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
                     index, array
@@ -292,7 +321,7 @@ fn evaluate<R: Rng>(
                 };
 
                 context.functions.insert(
-                    index,
+                    format!("created_array_{0}", index),
                     format!(
                         "fn created_array_{0}(index: u32) -> f32 {{
                         let array_{0} = array<f32, {1}>({2});
@@ -330,7 +359,9 @@ fn evaluate<R: Rng>(
                     context.dag[index].1[0]
                 )
             );
-            context.functions.insert(index, function);
+            context
+                .functions
+                .insert(format!("reduce_{}", index), function);
             format!("reduce_{}()", index)
         }
         NodeOp::ReduceResult => "reduction".to_string(),
@@ -352,7 +383,7 @@ fn evaluate<R: Rng>(
                 .unwrap_or_else(|| arg_0.clone());
 
             if *is_table {
-                context.functions.insert(index, format!(
+                context.functions.insert(format!("table_{}", index), format!(
                     "fn table_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
                     index,
                     arg_0
@@ -383,7 +414,7 @@ fn evaluate<R: Rng>(
                 context.rng.random::<u32>(),
                 evaluate(context, false, context.dag[index].1[0])
             );
-            context.functions.insert(index, function);
+            context.functions.insert(format!("rev_{}", index), function);
             format!(
                 "rev_{}(coord_reverse(thread_coord, dispatch_size), dispatch_size, thread)",
                 index,
@@ -392,10 +423,17 @@ fn evaluate<R: Rng>(
     }
 }
 
-type AuxFunctions = HashMap<usize, String>;
+type AuxFunctions = HashMap<String, String>;
 
 fn evaluate_size<R: Rng>(context: &mut EvaluationContext<R>, index: usize) -> String {
     match &context.dag[index].0.size {
+        Size::Join(a, b) => {
+            format!(
+                "coord_plus_x({}, {}[0])",
+                evaluate_size(context, *a),
+                evaluate_size(context, *b)
+            )
+        }
         Size::Drop { array, num } => {
             format!(
                 "coord_plus_x({}, -{})",

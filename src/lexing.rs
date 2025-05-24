@@ -103,6 +103,8 @@ pub enum Token<'source> {
     Pow,
     #[regex(r"tau|τ")]
     Tau,
+    #[regex(r"join")]
+    Join,
     #[token("&asr")]
     AudioSampleRate,
     #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
@@ -173,7 +175,7 @@ impl<'a> FunctionOrOp<'a> {
         match self {
             Self::Op(Op::Monadic(_)) => 0,
             Self::Op(Op::Drop) => -1,
-            Self::Op(Op::Dyadic(_)) => -1,
+            Self::Op(Op::Dyadic(_) | Op::Join) => -1,
             Self::Op(Op::Value(_) | Op::String(_) | Op::Char(_) | Op::Array(_)) => 1,
             Self::Op(Op::Rand) => 1,
             Self::Op(Op::Stack(StackOp::Dup)) => 1,
@@ -215,7 +217,7 @@ impl<'a> FunctionOrOp<'a> {
         match self {
             Self::Op(Op::Monadic(_)) => 1,
             Self::Op(Op::Drop) => 2,
-            Self::Op(Op::Dyadic(_)) => 2,
+            Self::Op(Op::Dyadic(_) | Op::Join) => 2,
             Self::Op(Op::Value(_) | Op::String(_) | Op::Char(_) | Op::Array(_)) => 0,
             Self::Op(Op::Rand) => 0,
             Self::Op(Op::Stack(StackOp::Dup)) => 0,
@@ -266,6 +268,7 @@ pub enum Op<'a> {
     Rand,
     Len,
     Drop,
+    Join,
     StartArray,
     EndArray,
     String(&'a str),
@@ -344,6 +347,7 @@ pub fn parse(token: Token) -> Option<TokenType> {
         Token::Range => TokenType::Op(Op::Range),
         Token::Len => TokenType::Op(Op::Len),
         Token::Drop => TokenType::Op(Op::Drop),
+        Token::Join => TokenType::Op(Op::Join),
         Token::AudioSampleRate => TokenType::Op(Op::Value(44100.0)),
         Token::Tau => TokenType::Op(Op::Value(std::f32::consts::TAU)),
         Token::Value(value) => TokenType::Op(Op::Value(value)),
