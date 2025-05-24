@@ -606,6 +606,33 @@ fn join_rev() {
 }
 
 #[test]
+fn rev_join_rev_rev() {
+    assert_output(
+        "rev join rev 3_4 rev 1_2",
+        vec![ReadBackValue {
+            size: [4, 0, 0, 0],
+            values: vec![1.0, 2.0, 3.0, 4.0],
+        }],
+    );
+}
+
+#[test]
+fn table_rev_range() {
+    assert_output(
+        "table + . range 3",
+        vec![ReadBackValue {
+            size: [3, 3, 0, 0],
+            #[rustfmt::skip]
+            values: vec![
+                0.0, 1.0, 2.0,
+                1.0, 2.0, 3.0,
+                2.0, 3.0, 4.0
+            ],
+        }],
+    );
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",

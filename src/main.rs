@@ -257,18 +257,17 @@ fn evaluate<R: Rng>(
             let right = evaluate(context, false, parents[0]);
             let left_size = evaluate_size(context, parents[1]);
             let left = evaluate(context, false, parents[1]);
-            insert_function(
-                context.functions,
-                format!("join_{}_right", index),
-                format!("return {};", right),
-            );
             insert_function(context.functions, format!("join_{}", index), format!("
-                if (thread_coord[0] >= {1}[0]) {{
-                    return join_{0}_right(coord_plus_x(thread_coord, -f32({1}[0])), coord_plus_x(dispatch_size, -f32({1}[0])), thread);
+                let left_size = {}[0];
+                if (thread_coord[0] >= left_size) {{
+                    thread_coord = coord_plus_x(thread_coord, -f32(left_size));
+                    dispatch_size = coord_plus_x(dispatch_size, -f32(left_size));
+                    return {};
                 }} else {{
-                    return {2};
+                    dispatch_size = Coord(left_size, dispatch_size[1], dispatch_size[2], dispatch_size[3]);
+                    return {};
                 }}
-                ", index, left_size, left));
+                ", left_size, right, left));
             format!("join_{}(thread_coord, dispatch_size, thread)", index)
         }
         NodeOp::Drop => {
@@ -276,16 +275,14 @@ fn evaluate<R: Rng>(
             let array = evaluate(context, false, parents[0]);
             let num = evaluate(context, false, parents[1]);
 
-            context.functions.insert(
+            insert_function(
+                context.functions,
                 format!("drop_{}", index),
-                format!(
-                    "fn drop_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
-                    index, array
-                ),
+                format!("return {};", array),
             );
 
             format!(
-                "drop_{}(coord_plus_x(thread_coord, {}), dispatch_size)",
+                "drop_{}(coord_plus_x(thread_coord, {}), dispatch_size, thread)",
                 index, num
             )
         }
@@ -367,19 +364,16 @@ fn evaluate<R: Rng>(
         NodeOp::Dyadic { op, is_table } => {
             let parents = &context.dag[index].1;
             let mut arg_0 = evaluate(context, false, parents[0]);
-            let arg_1 = parents
-                .get(1)
-                .map(|&parent| evaluate(context, false, parent))
-                .unwrap_or_else(|| arg_0.clone());
+            let arg_1 = evaluate(context, false, parents[1]);
 
             if *is_table {
-                context.functions.insert(format!("table_{}", index), format!(
-                    "fn table_{}(thread_coord: Coord, dispatch_size: Coord) -> f32 {{return {};}}",
-                    index,
-                    arg_0
-                ));
+                insert_function(
+                    context.functions,
+                    format!("table_{}", index),
+                    format!("return {};", arg_0),
+                );
                 arg_0 = format!(
-                    "table_{}(coord_transpose(thread_coord), dispatch_size)",
+                    "table_{}(coord_transpose(thread_coord), dispatch_size, thread)",
                     index
                 );
             }
@@ -419,7 +413,9 @@ fn insert_function(functions: &mut AuxFunctions, name: String, body: String) {
     functions.insert(
         name.clone(),
         format!(
-            "fn {}(thread_coord: Coord, dispatch_size: Coord, thread: vec3<u32>) -> f32 {{
+            "fn {}(thread_coord_: Coord, dispatch_size_: Coord, thread: vec3<u32>) -> f32 {{
+                var thread_coord = thread_coord_;
+                var dispatch_size = dispatch_size_;
             {}
         }}",
             name, body
@@ -431,7 +427,7 @@ fn evaluate_size<R: Rng>(context: &mut EvaluationContext<R>, index: usize) -> St
     match &context.dag[index].0.size {
         Size::Join(a, b) => {
             format!(
-                "coord_plus_x({}, {}[0])",
+                "coord_plus_x({}, f32({}[0]))",
                 evaluate_size(context, *a),
                 evaluate_size(context, *b)
             )
