@@ -3,8 +3,12 @@ use logos::Logos;
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t]+")]
 pub enum Token<'source> {
-    #[regex(r"[0-9]+(\.[0-9]+)?(_[0-9]+(\.[0-9]+)?)+", |lex| {
-        lex.slice().split('_').map(|value| value.parse::<f32>()).collect::<Result<Vec<_>, _>>().unwrap()
+    #[regex(r"[0-9]+((\.|/)[0-9]+)?(_[0-9]+((\.|/)[0-9]+)?)+", |lex| {
+        lex.slice().split('_').map(|value| if let Some((left, right)) = value.split_once('/') {
+            left.parse::<f32>().unwrap() / right.parse::<f32>().unwrap()
+        } else {
+            value.parse::<f32>().unwrap()
+        }).collect::<Vec<f32>>()
     })]
     UnderscoreArray(Vec<f32>),
     #[regex("@.", |lex| lex.slice().chars().nth(1).unwrap())]
@@ -107,7 +111,13 @@ pub enum Token<'source> {
     Join,
     #[token("&asr")]
     AudioSampleRate,
-    #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f32>().unwrap())]
+    #[regex(r"[0-9]+((\.|/)[0-9]+)?", |lex| {
+        if let Some((left, right)) = lex.slice().split_once('/') {
+            left.parse::<f32>().unwrap() / right.parse::<f32>().unwrap()
+        } else {
+            lex.slice().parse::<f32>().unwrap()
+        }
+    })]
     Value(f32),
     #[token("(")]
     OpenParen,
@@ -171,8 +181,8 @@ pub enum FunctionOrOp<'a> {
 }
 
 impl<'a> FunctionOrOp<'a> {
-    pub fn stack_delta(&self) -> i32 {
-        match self {
+    pub fn stack_delta(&self) -> Result<i32, ()> {
+        Ok(match self {
             Self::Op(Op::Monadic(_)) => 0,
             Self::Op(Op::Drop) => -1,
             Self::Op(Op::Dyadic(_) | Op::Join) => -1,
@@ -182,10 +192,13 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => -1,
             Self::Op(Op::Len | Op::Rev | Op::Range) => 0,
-            Self::Op(Op::EndArray) => todo!(),
-            Self::Op(Op::StartArray) => todo!(),
+            Self::Op(Op::EndArray) => return dbg!(Err(())),
+            Self::Op(Op::StartArray) => return dbg!(Err(())),
             Self::MonadicModifierFunction { modifier, code } => {
-                let stack_delta = code.iter().map(|op| op.stack_delta()).sum::<i32>();
+                let stack_delta = code
+                    .iter()
+                    .map(|op| op.stack_delta())
+                    .sum::<Result<i32, ()>>()?;
 
                 let modifier = match *modifier {
                     MonadicModifier::Back => 0,
@@ -196,25 +209,21 @@ impl<'a> FunctionOrOp<'a> {
                     MonadicModifier::Reduce => 1,
                     MonadicModifier::On => 1,
                     MonadicModifier::Rows => 0,
-                    MonadicModifier::Below => return 1,
-                    MonadicModifier::Repeat => todo!(),
-                    MonadicModifier::Both => todo!(),
+                    MonadicModifier::Below => return Ok(1),
+                    MonadicModifier::Repeat => return dbg!(Err(())),
+                    MonadicModifier::Both => return dbg!(Err(())),
                 };
 
                 modifier + stack_delta
             }
-            Self::DyadicModifierFunction {
-                modifier,
-                code_a,
-                code_b,
-            } => {
-                todo!()
+            Self::DyadicModifierFunction { .. } => {
+                return dbg!(Err(()));
             }
-        }
+        })
     }
 
-    pub fn stack_usage(&self) -> u32 {
-        match self {
+    pub fn stack_usage(&self) -> Result<u32, ()> {
+        Ok(match self {
             Self::Op(Op::Monadic(_)) => 1,
             Self::Op(Op::Drop) => 2,
             Self::Op(Op::Dyadic(_) | Op::Join) => 2,
@@ -224,11 +233,14 @@ impl<'a> FunctionOrOp<'a> {
             Self::Op(Op::Stack(StackOp::Ident)) => 0,
             Self::Op(Op::Stack(StackOp::Pop)) => 1,
             Self::Op(Op::Len | Op::Rev | Op::Range) => 1,
-            Self::Op(Op::EndArray) => todo!(),
+            Self::Op(Op::EndArray) => return dbg!(Err(())),
             // Tricky
-            Self::Op(Op::StartArray) => todo!(),
+            Self::Op(Op::StartArray) => return dbg!(Err(())),
             Self::MonadicModifierFunction { modifier, code } => {
-                let stack_usage = code.iter().map(|op| op.stack_usage()).sum::<u32>();
+                let stack_usage = code
+                    .iter()
+                    .map(|op| op.stack_usage())
+                    .sum::<Result<u32, ()>>()?;
 
                 let modifier = match *modifier {
                     MonadicModifier::Back => 0,
@@ -240,20 +252,14 @@ impl<'a> FunctionOrOp<'a> {
                     MonadicModifier::On => 0,
                     MonadicModifier::Rows => 0,
                     MonadicModifier::Below => 0,
-                    MonadicModifier::Repeat => todo!(),
-                    MonadicModifier::Both => todo!(),
+                    MonadicModifier::Repeat => return dbg!(Err(())),
+                    MonadicModifier::Both => return dbg!(Err(())),
                 };
 
                 modifier + stack_usage
             }
-            Self::DyadicModifierFunction {
-                modifier,
-                code_a,
-                code_b,
-            } => {
-                todo!()
-            }
-        }
+            Self::DyadicModifierFunction { .. } => return dbg!(Err(())),
+        })
     }
 }
 

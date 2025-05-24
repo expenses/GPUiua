@@ -71,11 +71,21 @@ fn parse_code_blocks_inner<'a>(
     left_to_right: bool,
     assignments: &HashMap<&str, Vec<FunctionOrOp<'a>>>,
 ) -> Result<Vec<FunctionOrOp<'a>>, Range<usize>> {
-    let (token, span) = match lexer.next() {
+    let (mut token, mut span) = match lexer.next() {
         Some((Ok(token), span)) => (token, span),
         Some((Err(()), span)) => return Err(span),
         None => return Ok(vec![]),
     };
+    while let Token::OpenParen | Token::CloseParen = token {
+        match lexer.next() {
+            Some((Ok(token2), span2)) => {
+                token = token2;
+                span = span2;
+            }
+            Some((Err(()), span)) => return Err(span),
+            None => return Ok(vec![]),
+        };
+    }
 
     let mut get_blocks = |span| {
         if let Some(&(Ok(Token::OpenParen), _)) = lexer.peek() {

@@ -154,9 +154,12 @@ fn function_delta() {
             code: vec![FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq))]
         }
         .stack_delta(),
-        -1
+        Ok(-1)
     );
-    assert_eq!(FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq)).stack_delta(), -1)
+    assert_eq!(
+        FunctionOrOp::Op(Op::Dyadic(DyadicOp::Eq)).stack_delta(),
+        Ok(-1)
+    )
 }
 
 #[test]

@@ -222,7 +222,8 @@ impl Runner {
                     str.trim(),
                     &str[span]
                 )
-            })?);
+            })?)
+            .map_err(|err| format!("{:?}", err))?;
         log::debug!("{}", module.code);
         Ok((self.run(&module).await, module))
     }
