@@ -259,7 +259,7 @@ fn handle_op(
                     let x = dag.stack.last().ok_or(Error::EmptyStack)?;
                     let y = dag
                         .stack
-                        .get(dag.stack.len() - 2)
+                        .get(dag.stack.len().checked_sub(2).ok_or(Error::EmptyStack)?)
                         .ok_or(Error::EmptyStack)?;
                     modifiers.override_size = Some(Size::Table(*x, *y));
                 }

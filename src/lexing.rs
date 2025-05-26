@@ -160,7 +160,7 @@ pub enum DyadicOp {
     Modulus,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StackOp {
     Dup,
     Pop,
@@ -172,6 +172,28 @@ pub struct FunctionOrOpWithContext<'a> {
     pub inner: FunctionOrOp<'a>,
     pub span: Range<usize>,
     pub line: &'a str,
+}
+
+impl<'a> PartialEq for FunctionOrOpWithContext<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.inner, &other.inner) {
+            (FunctionOrOp::Op(Op::Value(a)), FunctionOrOp::Op(Op::Value(b)))
+                if a.is_nan() && b.is_nan() =>
+            {
+                true
+            }
+            (FunctionOrOp::Op(Op::Array(a)), FunctionOrOp::Op(Op::Array(b))) => {
+                a.iter().zip(b).all(|(a, b)| {
+                    if a.is_nan() && b.is_nan() {
+                        true
+                    } else {
+                        a == b
+                    }
+                })
+            }
+            (a, b) => a == b,
+        }
+    }
 }
 
 impl<'a> Deref for FunctionOrOpWithContext<'a> {
@@ -188,7 +210,7 @@ impl<'a> FunctionOrOpWithContext<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FunctionOrOp<'a> {
     Op(Op<'a>),
     MonadicModifierFunction {
@@ -285,7 +307,7 @@ impl<'a> FunctionOrOp<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op<'a> {
     Monadic(MonadicOp),
     Dyadic(DyadicOp),
@@ -304,12 +326,12 @@ pub enum Op<'a> {
     Array(Vec<f32>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DyadicModifier {
     Fork,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MonadicModifier {
     Table,
     Back,

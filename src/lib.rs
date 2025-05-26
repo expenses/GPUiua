@@ -18,7 +18,6 @@ pub fn generate_module(
     code: Vec<FunctionOrOpWithContext>,
 ) -> Result<ShaderModule, (graph_generation::Error, Range<usize>, &str)> {
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
-
     let (dag, final_stack) = parse_code_to_dag(code)?;
     let mut full_eval_to: BTreeMap<usize, (usize, Vec<usize>)> = BTreeMap::new();
     for (i, &index) in final_stack.iter().enumerate() {
@@ -45,6 +44,18 @@ pub fn generate_module(
             }
 
             let node = &dag[index].0;
+            let size = node.size;
+
+            for &parent in &dag[index].1 {
+                let node = &dag[parent].0;
+                if node.op == NodeOp::Rand && node.size != size {
+                    full_eval_to
+                        .entry(parent)
+                        .or_insert_with(|| (dummy_buffer_index, vec![]));
+                    dummy_buffer_index += 1;
+                }
+            }
+
             match node {
                 Node {
                     op: NodeOp::Dyadic { .. },
@@ -59,11 +70,6 @@ pub fn generate_module(
                     }
                 }
                 Node {
-                    op: NodeOp::Rand,
-                    size: Size::Scalar,
-                    ..
-                }
-                | Node {
                     op: NodeOp::Reduce(_),
                     ..
                 }
@@ -376,7 +382,14 @@ fn evaluate<R: Rng>(
                 insert_function(
                     context.functions,
                     format!("table_{}", index),
-                    format!("return {};", arg_0),
+                    format!(
+                        "
+                        var random_seed = u32({}) + thread.x;
+                        return {};
+                    ",
+                        context.rng.random::<u32>(),
+                        arg_0
+                    ),
                 );
                 arg_0 = format!(
                     "table_{}(coord_transpose(thread_coord), dispatch_size, thread)",
