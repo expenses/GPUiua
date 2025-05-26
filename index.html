@@ -1,5 +1,16 @@
 <!DOCTYPE html>
 <html>
-  <head></head>
-  <body></body>
+  <head><link rel="modulepreload" href="/gpuiua-557a274f89e524e7.js" crossorigin="anonymous" integrity="sha384-XlNQCKjJxIjZy6M6FKkwSvH1IV9W341CLl69opNVCXFiLfU6e8+EjUAxaZrLxz4G"><link rel="preload" href="/gpuiua-557a274f89e524e7_bg.wasm" crossorigin="anonymous" integrity="sha384-OdBZznDKEZxIeuhNcsS9PIqqA9hvTXbvV1nLyYuy8y22lBnQHuRqxpK3YuwRRk7A" as="fetch" type="application/wasm"></head>
+  <body>
+<script type="module">
+import init, * as bindings from '/gpuiua-557a274f89e524e7.js';
+const wasm = await init({ module_or_path: '/gpuiua-557a274f89e524e7_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
 </html>
