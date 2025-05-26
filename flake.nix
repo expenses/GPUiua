@@ -26,17 +26,11 @@
           ]);
       in {
         packages = rec {
-          wasm = wasm-crane-lib.buildPackage {
+          wasm = wasm-crane-lib.buildTrunkPackage {
             name = "gpuiua";
             src = pkgs.lib.cleanSource ./.;
-            CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-            doCheck = false;
+            RUSTFLAGS = ''--cfg getrandom_backend="wasm_js"'';
           };
-          wasm-dir = pkgs.runCommand "gpuiua-dir" {} ''
-            ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen ${wasm}/bin/gpuiua.wasm --target web --out-dir $out
-            cp ${./index.html} $out/index.html
-          '';
-          serve = with pkgs; writeShellScriptBin "serve" "${caddy}/bin/caddy file-server --listen ':8000' --root ${wasm-dir}";
         };
 
         devShells.default = with pkgs;
@@ -44,7 +38,7 @@
             nativeBuildInputs = [
               pkg-config
               linuxPackages_latest.perf
-                            hotspot
+              hotspot
             ];
             buildInputs = [
               udev

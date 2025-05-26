@@ -640,6 +640,24 @@ fn table_rev_range() {
 }
 
 #[test]
+fn table_rows_rand() {
+    assert_output(
+        "table eq . rows gap rand range 5",
+        vec![ReadBackValue {
+            size: [5, 5, 0, 0],
+            #[rustfmt::skip]
+            values: vec![
+                1.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }],
+    )
+}
+
+#[test]
 fn spiral() {
     assert_output(
         "⟜(×20-⊸¬÷⟜⇡)200",
