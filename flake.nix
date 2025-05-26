@@ -30,6 +30,7 @@
             name = "gpuiua";
             src = pkgs.lib.cleanSource ./.;
             RUSTFLAGS = ''--cfg getrandom_backend="wasm_js"'';
+            trunkExtraBuildArgs = ''--public-url https://expenses.github.io/GPUiua/'';
           };
         };
 
